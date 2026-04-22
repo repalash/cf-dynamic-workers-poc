@@ -17,11 +17,31 @@ type Env = {
 
 const adminRoutes = createAdminRoutes()
 
+// Two ASSETS-binding shapes to bridge:
+//   * Dev (@cloudflare/vite-plugin emulation): serves assets at vite's base path
+//     /_teeny/admin/*. Works fine for the prefixed URL.
+//   * Prod (real Cloudflare ASSETS): serves files 1:1 from dist/client. With
+//     vite's base="/_teeny/admin/", HTML references /_teeny/admin/assets/foo.js
+//     but the binding has it at /assets/foo.js — the prefixed request misses
+//     and (via not_found_handling: single-page-application) returns index.html.
+// Strategy: try prefixed first. If we got HTML back for a request whose last
+// path segment has a "." (looks like a file), treat it as the SPA fallback and
+// retry with the prefix stripped.
+function looksLikeFileRequest(pathname: string): boolean {
+  const last = pathname.split("/").pop() ?? ""
+  return last.includes(".")
+}
+
 async function serveSPA(req: Request, env: Env): Promise<Response> {
-  const first = await env.ASSETS.fetch(req)
-  if (first.status !== 404) return first
   const url = new URL(req.url)
-  return env.ASSETS.fetch(new Request(new URL("/_teeny/admin/index.html", url.origin).toString(), req))
+  const first = await env.ASSETS.fetch(req)
+
+  if (looksLikeFileRequest(url.pathname) && (first.headers.get("content-type") ?? "").startsWith("text/html")) {
+    const stripped = url.pathname.replace(/^\/_teeny\/admin/, "") || "/"
+    const strippedReq = new Request(new URL(stripped + url.search, url.origin).toString(), req)
+    return env.ASSETS.fetch(strippedReq)
+  }
+  return first
 }
 
 export default {
