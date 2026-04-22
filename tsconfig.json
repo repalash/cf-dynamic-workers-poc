@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "types": ["@cloudflare/workers-types", "vite/client", "@cloudflare/vitest-pool-workers"],
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "paths": {
+      "@/*": ["./src/*"],
+      "@shared/*": ["./src/shared/*"]
+    }
+  },
+  "include": ["src", "test", "env.d.ts"],
+  "exclude": [
+    "src/server/user-runtime/bundle-entry.ts",
+    "src/server/user-runtime/starter-user-code.ts"
+  ]
+}

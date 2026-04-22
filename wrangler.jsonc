@@ -1,0 +1,25 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cf-dynamic-workers-poc",
+  "main": "src/server/worker.ts",
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": true
+  },
+  "worker_loaders": [
+    { "binding": "LOADER" }
+  ],
+  "d1_databases": [
+    {
+      "binding": "TEENY_PRIMARY_DB",
+      "database_name": "cf-dynamic-workers-poc-db",
+      "database_id": "00000000-0000-0000-0000-000000000000"
+    }
+  ],
+  "vars": {
+    "MIGRATE_UI_USER": "admin"
+  }
+}
