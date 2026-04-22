@@ -1,9 +1,7 @@
-// Admin state: the user's file tree for the dynamic worker + the compiled
-// config JSON. Files are an arbitrary map (Record<string, string>) so the
-// user can add/remove files freely (worker.js, user.js, teenybase.ts,
-// lib/foo.ts, package.json — whatever). The host bundles them via
-// @cloudflare/worker-bundler at spawn time and feeds the result into
-// LOADER.load({ modules }).
+// Admin state is a single KV table (`_teeny_admin_state`) with three keys:
+//   files        — the deployed tree (runtime reads this)
+//   files_draft  — the editor's working copy; deploy promotes it to files
+//   config       — compiled DatabaseSettings JSON from the last deploy
 import type { DatabaseSettings } from "teenybase"
 
 export const ADMIN_STATE_DDL = `
@@ -14,39 +12,32 @@ CREATE TABLE IF NOT EXISTS _teeny_admin_state (
 );
 `.trim()
 
-export async function adminStateTableExists(db: D1Database): Promise<boolean> {
+export type FilesMap = Record<string, string>
+
+type StateKey = "files" | "files_draft" | "config"
+
+async function readKey(db: D1Database, key: StateKey): Promise<string | null> {
   try {
     const row = await db
-      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='_teeny_admin_state'")
-      .first()
-    return row !== null
+      .prepare("SELECT value FROM _teeny_admin_state WHERE key=?")
+      .bind(key)
+      .first<{ value: string }>()
+    return row?.value ?? null
   } catch {
-    // D1 transient (happens on dev-server cold start) — treat as "not ready"
-    // which downstream callers handle as setup-required / null.
-    return false
+    // Table not there yet (pre-setup) or D1 cold-start — both behave the same
+    // to callers: no data.
+    return null
   }
 }
 
-async function readKey(db: D1Database, key: string): Promise<string | null> {
-  if (!(await adminStateTableExists(db))) return null
-  const row = await db
-    .prepare("SELECT value FROM _teeny_admin_state WHERE key=?")
-    .bind(key)
-    .first<{ value: string }>()
-  return row?.value ?? null
-}
-
-async function writeKey(db: D1Database, key: string, value: string): Promise<void> {
+async function writeKey(db: D1Database, key: StateKey, value: string): Promise<void> {
   await db
     .prepare("INSERT OR REPLACE INTO _teeny_admin_state (key, value, updated_at) VALUES (?, ?, ?)")
     .bind(key, value, Date.now())
     .run()
 }
 
-export type FilesMap = Record<string, string>
-
-async function readFilesKey(db: D1Database, key: "files" | "files_draft"): Promise<FilesMap | null> {
-  const s = await readKey(db, key)
+function parseFiles(s: string | null): FilesMap | null {
   if (!s) return null
   try {
     const parsed = JSON.parse(s)
@@ -56,24 +47,27 @@ async function readFilesKey(db: D1Database, key: "files" | "files_draft"): Promi
   }
 }
 
-// Live files — the deployed tree that the runtime isolate reads. Updated
-// atomically by deploy(), never by the editor.
-export const readFiles = (db: D1Database) => readFilesKey(db, "files")
+export async function adminStateTableExists(db: D1Database): Promise<boolean> {
+  try {
+    const row = await db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='_teeny_admin_state'")
+      .first()
+    return row !== null
+  } catch {
+    return false
+  }
+}
+
+export const readFiles = async (db: D1Database) => parseFiles(await readKey(db, "files"))
+export const readDraftFiles = async (db: D1Database) => parseFiles(await readKey(db, "files_draft"))
 export async function writeFiles(db: D1Database, files: FilesMap): Promise<void> {
   await writeKey(db, "files", JSON.stringify(files))
 }
-
-// Draft files — the editor's working copy. Persisted so a refresh doesn't
-// lose edits, but never read by the runtime. Deploy promotes draft → live.
-export const readDraftFiles = (db: D1Database) => readFilesKey(db, "files_draft")
 export async function writeDraftFiles(db: D1Database, files: FilesMap): Promise<void> {
   await writeKey(db, "files_draft", JSON.stringify(files))
 }
 export async function deleteDraftFiles(db: D1Database): Promise<void> {
-  await db
-    .prepare("DELETE FROM _teeny_admin_state WHERE key='files_draft'")
-    .run()
-    .catch(() => {})
+  await db.prepare("DELETE FROM _teeny_admin_state WHERE key='files_draft'").run().catch(() => {})
 }
 
 export async function readConfig(db: D1Database): Promise<DatabaseSettings | null> {
@@ -85,7 +79,34 @@ export async function readConfig(db: D1Database): Promise<DatabaseSettings | nul
     return null
   }
 }
-
 export async function writeConfig(db: D1Database, config: DatabaseSettings): Promise<void> {
   await writeKey(db, "config", JSON.stringify(config))
+}
+
+/**
+ * Runtime hot-path: read files + config in one D1 query.
+ */
+export async function readRuntimeState(
+  db: D1Database
+): Promise<{ files: FilesMap | null; config: DatabaseSettings | null }> {
+  try {
+    const rows = await db
+      .prepare("SELECT key, value FROM _teeny_admin_state WHERE key IN ('files','config')")
+      .all<{ key: string; value: string }>()
+    const map = new Map((rows.results ?? []).map((r) => [r.key, r.value]))
+    return {
+      files: parseFiles(map.get("files") ?? null),
+      config: (() => {
+        const s = map.get("config")
+        if (!s) return null
+        try {
+          return JSON.parse(s) as DatabaseSettings
+        } catch {
+          return null
+        }
+      })(),
+    }
+  } catch {
+    return { files: null, config: null }
+  }
 }

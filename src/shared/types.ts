@@ -28,10 +28,6 @@ export interface FilesResponse {
   config: DatabaseSettings | null
 }
 
-export interface EvalConfigResult {
-  config: DatabaseSettings
-}
-
 export interface GenerateResult {
   migrations: { name: string; sql: string; sql_revert?: string }[]
   changes: DiffChanges

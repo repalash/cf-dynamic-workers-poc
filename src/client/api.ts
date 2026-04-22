@@ -1,7 +1,6 @@
 import type {
   DeployRequest,
   DeployResult,
-  EvalConfigResult,
   FilesMap,
   FilesResponse,
   GenerateResult,
@@ -36,13 +35,10 @@ export const api = {
     req<{ ok: true }>("/save-draft", { method: "POST", body: JSON.stringify({ files }) }),
   revertDraft: () => req<{ ok: true }>("/revert-draft", { method: "POST" }),
   setup: () => req<{ ok: true }>("/setup", { method: "POST" }),
-  evalConfig: (files: FilesMap) =>
-    req<EvalConfigResult>("/eval-config", { method: "POST", body: JSON.stringify({ files }) }),
   generate: (files: FilesMap) =>
     req<GenerateResult>("/generate", { method: "POST", body: JSON.stringify({ files }) }),
   deploy: (body: DeployRequest) =>
     req<DeployResult>("/deploy", { method: "POST", body: JSON.stringify(body) }),
   history: () => req<{ rows: MigrationHistoryRow[] }>("/history"),
   clear: () => req<{ ok: true; dropped: number; names: string[] }>("/clear", { method: "POST" }),
-  syncFromD1: () => req<{ ok: true }>("/sync-from-d1", { method: "POST" }),
 }

@@ -1,11 +1,9 @@
-// Host worker entry. Routes:
+// Host worker:
 //   /_teeny/admin/api/*  → admin Hono sub-app
-//   /_teeny/admin/*      → SPA assets (with SPA fallback)
-//   everything else      → bundle user files + spawn dynamic worker + forward
-import type { DatabaseSettings } from "teenybase"
+//   /_teeny/admin/*      → SPA assets (with SPA fallback to index.html)
+//   everything else      → bundle current live files + LOADER.load + forward
 import { createAdminRoutes } from "./admin/routes"
-import { readConfig, readFiles } from "./admin/state"
-import type { FilesMap } from "./admin/state"
+import { readRuntimeState } from "./admin/state"
 import { spawnDynamic } from "./admin/spawn"
 
 type Env = {
@@ -23,8 +21,7 @@ async function serveSPA(req: Request, env: Env): Promise<Response> {
   const first = await env.ASSETS.fetch(req)
   if (first.status !== 404) return first
   const url = new URL(req.url)
-  const fallback = new URL("/_teeny/admin/index.html", url.origin)
-  return env.ASSETS.fetch(new Request(fallback.toString(), req))
+  return env.ASSETS.fetch(new Request(new URL("/_teeny/admin/index.html", url.origin).toString(), req))
 }
 
 export default {
@@ -33,22 +30,11 @@ export default {
     const path = url.pathname
     if (path.startsWith("/_teeny/admin/api/")) {
       const stripped = path.replace(/^\/_teeny\/admin\/api/, "") || "/"
-      const rewritten = new URL(stripped + url.search, url.origin)
-      return adminRoutes.fetch(new Request(rewritten.toString(), req), env, ctx)
+      return adminRoutes.fetch(new Request(new URL(stripped + url.search, url.origin).toString(), req), env, ctx)
     }
     if (path.startsWith("/_teeny/admin")) return serveSPA(req, env)
 
-    let files: FilesMap | null = null
-    let config: DatabaseSettings | null = null
-    try {
-      ;[files, config] = await Promise.all([
-        readFiles(env.TEENY_PRIMARY_DB),
-        readConfig(env.TEENY_PRIMARY_DB),
-      ])
-    } catch {
-      // D1 transient (admin state not created, or cold-start). Fall through
-      // to the 503 below; explicit catch keeps Vite HMR overlay from showing.
-    }
+    const { files, config } = await readRuntimeState(env.TEENY_PRIMARY_DB)
     if (!files || !config) {
       return new Response("Setup required. Visit /_teeny/admin to initialize.", {
         status: 503,
@@ -69,10 +55,7 @@ export default {
       const body = debug
         ? `Dynamic worker spawn/fetch failed:\n${e?.message}\n\n${e?.stack ?? ""}`
         : `Dynamic worker spawn/fetch failed: ${e?.message}`
-      return new Response(body, {
-        status: 502,
-        headers: { "content-type": "text/plain; charset=utf-8" },
-      })
+      return new Response(body, { status: 502, headers: { "content-type": "text/plain; charset=utf-8" } })
     }
   },
 } satisfies ExportedHandler<Env>

@@ -1,9 +1,3 @@
-// Single-page admin UI. Dark cf-ui-sample design system.
-//
-// Flow:
-//   Setup → edit files in Files panel (drafts, persisted) → Generate preview →
-//   optionally write data SQL in step 2 → Deploy (atomic: eval + migrate +
-//   promote drafts + bump $settings_version + bust LOADER cache).
 import { useEffect, useMemo, useState } from "react"
 import { api } from "./api"
 import { Editor } from "./Editor"
@@ -127,8 +121,8 @@ function DiffOutput({ changes, extraLogs }: { changes: DiffChanges; extraLogs: s
 export function App() {
   const [status, setStatus] = useState<StatusPayload | null>(null)
   const [live, setLive] = useState<FilesMap | null>(null)
-  const [files, setFiles] = useState<FilesMap>({})     // current editor state (draft or live)
-  const [draftSaved, setDraftSaved] = useState<FilesMap | null>(null)  // last known server-saved draft
+  const [files, setFiles] = useState<FilesMap>({})
+  const [draftSaved, setDraftSaved] = useState<FilesMap | null>(null)
   const [activeFile, setActiveFile] = useState<string>("")
   const [lastGen, setLastGen] = useState<GenerateResult | null>(null)
   const [sqlText, setSqlText] = useState<string>("")
@@ -167,10 +161,11 @@ export function App() {
   const sqlEdited = lastGen ? sqlText.trim() !== autoSql.trim() : false
   const draftDirty = !filesEqual(files, draftSaved ?? live ?? {})
   const draftAheadOfLive = live ? !filesEqual(files, live) : Object.keys(files).length > 0
-  // "Deploy" is meaningful if: there are pending draft file changes vs live,
-  // OR there's user-written SQL to run. Either condition = something to deploy.
-  const haveSqlToRun = lastGen !== null && !isEmptyOrCommentsOnly(sqlText)
-  const canDeploy = !!lastGen && (draftAheadOfLive || haveSqlToRun || lastGen.migrations.length > 0)
+  const canDeploy = !!lastGen && (
+    draftAheadOfLive ||
+    lastGen.migrations.length > 0 ||
+    !isEmptyOrCommentsOnly(sqlText)
+  )
 
   function updateActiveContent(content: string) {
     if (!activeFile) return
@@ -198,13 +193,19 @@ export function App() {
 
   async function doRevertDraft() {
     if (!live) { setErr("Nothing to revert to — no deploy yet."); return }
-    if (!confirm("Discard all draft edits and reset to the deployed files?")) return
-    setBusy("revert"); setErr(null)
-    try {
-      await api.revertDraft()
-      await loadAll()
-      setNote("Drafts reverted to the deployed version.")
-    } catch (e: any) { setErr(e.message) } finally { setBusy("") }
+    setConfirmOpen({
+      title: "Revert drafts",
+      body: "Discard all draft edits and reset to the deployed files?",
+      destructive: true,
+      run: async () => {
+        setConfirmOpen(null); setBusy("revert"); setErr(null)
+        try {
+          await api.revertDraft()
+          await loadAll()
+          setNote("Drafts reverted to the deployed version.")
+        } catch (e: any) { setErr(e.message) } finally { setBusy("") }
+      },
+    })
   }
 
   async function doGenerate() {
@@ -278,12 +279,19 @@ export function App() {
     setNewFileName("")
   }
   function removeFile(name: string) {
-    if (!confirm(`Delete ${name} from drafts? (Save draft or Deploy to persist.)`)) return
-    setFiles((f) => { const { [name]: _, ...rest } = f; return rest })
-    if (activeFile === name) {
-      const next = Object.keys(files).find((n) => n !== name) ?? ""
-      setActiveFile(next)
-    }
+    setConfirmOpen({
+      title: `Delete ${name}`,
+      body: `Delete ${name} from drafts? (Save draft or Deploy to persist.)`,
+      destructive: true,
+      run: () => {
+        setConfirmOpen(null)
+        setFiles((f) => { const { [name]: _, ...rest } = f; return rest })
+        if (activeFile === name) {
+          const next = Object.keys(files).find((n) => n !== name) ?? ""
+          setActiveFile(next)
+        }
+      },
+    })
   }
 
   async function doClear() {
