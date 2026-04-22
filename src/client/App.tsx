@@ -1,29 +1,29 @@
-// Single-page admin UI — dark cf-ui-sample design system. Panels:
-//   Status → Setup (conditional) → Sync (conditional) → Migrate (3 steps) →
-//   User code (SSR user.js editor) → History → Danger.
+// Single-page admin UI. Dark cf-ui-sample design system. Panels:
+//   Status → Setup (conditional) → Sync (conditional) → Migrate (3 steps,
+//   driven by the in-memory files map) → Files (file manager) → History →
+//   Danger.
+//
+// The files map is the source of truth for both:
+//   - migration generation (teenybase.ts evaluated server-side to JSON)
+//   - runtime spawn (bundled by worker-bundler at request time)
+// All save + generate + apply endpoints take {files} in the body.
 import { useEffect, useMemo, useState } from "react"
 import { api } from "./api"
 import { Editor } from "./Editor"
 import { Confirm } from "./Confirm"
 import type {
   DiffChanges,
+  FilesMap,
   GenerateResult,
   MigrationHistoryRow,
   StatusPayload,
 } from "@shared/types"
-import type { DatabaseSettings } from "teenybase"
 
-function pretty(x: unknown) {
-  return JSON.stringify(x, null, 2)
-}
 function joinSql(migs: { sql: string }[]) {
   return migs.map((m) => m.sql.trim()).join("\n\n")
 }
 function isEmptyOrCommentsOnly(sql: string) {
-  const stripped = sql
-    .replace(/--[^\n]*\n/g, "")
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .trim()
+  const stripped = sql.replace(/--[^\n]*\n/g, "").replace(/\/\*[\s\S]*?\*\//g, "").trim()
   return stripped.length === 0
 }
 function looksDestructive(sql: string) {
@@ -31,6 +31,19 @@ function looksDestructive(sql: string) {
 }
 function pad5(n: number) {
   return String(n).padStart(5, "0")
+}
+function extOf(name: string): "json" | "javascript" {
+  return name.endsWith(".json") ? "json" : "javascript"
+}
+function filesEqual(a: FilesMap, b: FilesMap): boolean {
+  const ak = Object.keys(a).sort()
+  const bk = Object.keys(b).sort()
+  if (ak.length !== bk.length) return false
+  for (let i = 0; i < ak.length; i++) {
+    if (ak[i] !== bk[i]) return false
+    if (a[ak[i]] !== b[bk[i]]) return false
+  }
+  return true
 }
 
 function ErrorBanner({ err, onClose }: { err: string | null; onClose: () => void }) {
@@ -71,7 +84,7 @@ function StatusPanel({ status }: { status: StatusPayload }) {
       </div>
       <div className="routes">
         <div className="route"><span className="label">CRUD</span><span className="tmpl">/api/v1/table/&#123;table&#125;/[select | list | view/:id | insert | update | edit/:id | delete]</span></div>
-        <div className="route"><span className="label">Auth</span><span className="tmpl">/api/v1/table/&#123;table&#125;/auth/[sign-up | login-password | refresh-token | ...]</span></div>
+        <div className="route"><span className="label">Auth</span><span className="tmpl">/api/v1/table/&#123;table&#125;/auth/[sign-up | login-password | ...]</span></div>
         <div className="route"><span className="label">Health</span><a href="/api/v1/health" target="_blank" rel="noreferrer">/api/v1/health</a></div>
         <div className="route"><span className="label">Swagger</span><a href="/api/v1/doc/ui" target="_blank" rel="noreferrer">/api/v1/doc/ui</a></div>
         <div className="route"><span className="label">Admin</span><a href="/api/v1/pocket/" target="_blank" rel="noreferrer">/api/v1/pocket/</a></div>
@@ -85,11 +98,9 @@ function DiffOutput({ changes, extraLogs }: { changes: DiffChanges; extraLogs: s
   const empty = changes.create.length === 0 && changes.drop.length === 0 && changes.alter.length === 0
   return (
     <div className="diff-output">
-      {extraLogs.map((l, i) => (
-        <div key={"l" + i} className="warn">{l}</div>
-      ))}
+      {extraLogs.map((l, i) => <div key={"l" + i} className="warn">{l}</div>)}
       {empty ? (
-        <div className="ok">No schema changes detected. Write data-only SQL below (backfill / seed) to run a data-only migration, or edit the config above.</div>
+        <div className="ok">No schema changes detected. Write data-only SQL below (backfill / seed) to run a data-only migration, or edit teenybase.ts.</div>
       ) : (
         <div className="diff-box">
           <h3>Changes</h3>
@@ -102,27 +113,13 @@ function DiffOutput({ changes, extraLogs }: { changes: DiffChanges; extraLogs: s
           {changes.alter.map(([nn, _pp, d], i) => (
             <div key={"a" + i}>
               <div className="diff-item diff-mod">~ Table &quot;{nn.name}&quot;</div>
-              {d.create.map((f) => (
-                <div key={"cf" + f.name} className="diff-sub diff-add">+ field &quot;{f.name}&quot;{f.type ? ` (${f.type})` : ""}</div>
-              ))}
-              {d.drop.map((f) => (
-                <div key={"df" + f.name} className="diff-sub diff-drop">- field &quot;{f.name}&quot;</div>
-              ))}
-              {d.alter.map(([a, b], j) => (
-                <div key={"af" + j} className="diff-sub diff-mod">~ field &quot;{a.name}&quot;{a.name !== b.name ? ` (renamed from ${b.name})` : ""}</div>
-              ))}
-              {(d.indexes?.create ?? []).map((ix, j) => (
-                <div key={"ic" + j} className="diff-sub diff-add">+ index {JSON.stringify(ix.fields)}</div>
-              ))}
-              {(d.indexes?.drop ?? []).map((ix, j) => (
-                <div key={"id" + j} className="diff-sub diff-drop">- index {JSON.stringify(ix.fields)}</div>
-              ))}
-              {(d.triggers?.create ?? []).map((t, j) => (
-                <div key={"tc" + j} className="diff-sub diff-add">+ trigger &quot;{t.name ?? ""}&quot;</div>
-              ))}
-              {(d.triggers?.drop ?? []).map((t, j) => (
-                <div key={"td" + j} className="diff-sub diff-drop">- trigger &quot;{t.name ?? ""}&quot;</div>
-              ))}
+              {d.create.map((f) => <div key={"cf" + f.name} className="diff-sub diff-add">+ field &quot;{f.name}&quot;{f.type ? ` (${f.type})` : ""}</div>)}
+              {d.drop.map((f) => <div key={"df" + f.name} className="diff-sub diff-drop">- field &quot;{f.name}&quot;</div>)}
+              {d.alter.map(([a, b], j) => <div key={"af" + j} className="diff-sub diff-mod">~ field &quot;{a.name}&quot;{a.name !== b.name ? ` (renamed from ${b.name})` : ""}</div>)}
+              {(d.indexes?.create ?? []).map((ix, j) => <div key={"ic" + j} className="diff-sub diff-add">+ index {JSON.stringify(ix.fields)}</div>)}
+              {(d.indexes?.drop ?? []).map((ix, j) => <div key={"id" + j} className="diff-sub diff-drop">- index {JSON.stringify(ix.fields)}</div>)}
+              {(d.triggers?.create ?? []).map((t, j) => <div key={"tc" + j} className="diff-sub diff-add">+ trigger &quot;{t.name ?? ""}&quot;</div>)}
+              {(d.triggers?.drop ?? []).map((t, j) => <div key={"td" + j} className="diff-sub diff-drop">- trigger &quot;{t.name ?? ""}&quot;</div>)}
               {d.fts ? <div className="diff-sub diff-mod">~ FTS index changed</div> : null}
             </div>
           ))}
@@ -134,56 +131,36 @@ function DiffOutput({ changes, extraLogs }: { changes: DiffChanges; extraLogs: s
 
 export function App() {
   const [status, setStatus] = useState<StatusPayload | null>(null)
-  const [configText, setConfigText] = useState<string>("")
-  const [appliedConfig, setAppliedConfig] = useState<DatabaseSettings | null>(null)
-  const [seedConfig, setSeedConfig] = useState<DatabaseSettings | null>(null)
+  const [files, setFiles] = useState<FilesMap>({})
+  const [filesSaved, setFilesSaved] = useState<FilesMap>({})
+  const [activeFile, setActiveFile] = useState<string>("")
   const [lastGen, setLastGen] = useState<GenerateResult | null>(null)
   const [sqlText, setSqlText] = useState<string>("")
   const [customName, setCustomName] = useState<string>("")
-  const [userCodeText, setUserCodeText] = useState<string>("")
-  const [userCodeSaved, setUserCodeSaved] = useState<string>("")
-  const [userStarterCode, setUserStarterCode] = useState<string>("")
-  const [workerCodeText, setWorkerCodeText] = useState<string>("")
-  const [workerCodeSaved, setWorkerCodeSaved] = useState<string>("")
-  const [workerStarterCode, setWorkerStarterCode] = useState<string>("")
-  const [codeTab, setCodeTab] = useState<"worker.js" | "user.js">("worker.js")
   const [history, setHistory] = useState<MigrationHistoryRow[]>([])
   const [err, setErr] = useState<string | null>(null)
   const [busy, setBusy] = useState<string>("")
   const [note, setNote] = useState<string>("")
   const [confirmOpen, setConfirmOpen] = useState<{
-    run: () => void
-    title: string
-    body: string
-    destructive: boolean
+    run: () => void; title: string; body: string; destructive: boolean
   } | null>(null)
+  const [newFileName, setNewFileName] = useState<string>("")
 
   async function loadAll() {
     try {
       setErr(null)
-      const [s, c] = await Promise.all([api.status(), api.config()])
+      const [s, f] = await Promise.all([api.status(), api.files()])
       setStatus(s)
-      setAppliedConfig(s.applied)
-      if (c.config && !seedConfig) {
-        setSeedConfig(c.config)
-        setConfigText(pretty(c.config))
-      } else if (!c.config && !seedConfig) {
-        // no seed yet — leave editor empty; will populate after Setup.
+      setFiles(f.files)
+      setFilesSaved(f.filesSaved ? f.files : {})
+      if (!activeFile || !(activeFile in f.files)) {
+        const first = Object.keys(f.files).find((n) => n === "teenybase.ts") ?? Object.keys(f.files)[0] ?? ""
+        setActiveFile(first)
       }
-      // Code seeds — if saved, use saved; else use starter. Track both so we
-      // can offer "Reset to starter". On first load, the server returns
-      // starter content when nothing's saved, so we cache it as the reference.
-      if (!userCodeText) setUserCodeText(c.userCode)
-      setUserCodeSaved(c.userCode)
-      if (!userStarterCode) setUserStarterCode(c.userCode)
-      if (!workerCodeText) setWorkerCodeText(c.workerCode)
-      setWorkerCodeSaved(c.workerCode)
-      if (!workerStarterCode) setWorkerStarterCode(c.workerCode)
     } catch (e: any) {
       setErr(e.message)
     }
   }
-
   useEffect(() => {
     loadAll()
     api.history().then((r) => setHistory(r.rows)).catch(() => {})
@@ -191,216 +168,138 @@ export function App() {
 
   const autoSql = useMemo(() => (lastGen ? joinSql(lastGen.migrations) : ""), [lastGen])
   const sqlEdited = lastGen ? sqlText.trim() !== autoSql.trim() : false
-  const canApply =
-    !!lastGen &&
-    (lastGen.migrations.length > 0 || !isEmptyOrCommentsOnly(sqlText)) &&
-    !isEmptyOrCommentsOnly(sqlText)
-  const userCodeDirty = userCodeText !== userCodeSaved
-  const workerCodeDirty = workerCodeText !== workerCodeSaved
+  const canApply = !!lastGen && (lastGen.migrations.length > 0 || !isEmptyOrCommentsOnly(sqlText)) && !isEmptyOrCommentsOnly(sqlText)
+  const filesDirty = !filesEqual(files, filesSaved)
+
+  function updateActiveContent(content: string) {
+    if (!activeFile) return
+    setFiles((f) => ({ ...f, [activeFile]: content }))
+  }
 
   async function doSetup() {
-    setBusy("setup")
-    setErr(null)
+    setBusy("setup"); setErr(null)
     try {
       await api.setup()
-      setSeedConfig(null) // re-seed editor from state
       await loadAll()
-      const r = await api.history()
-      setHistory(r.rows)
-      setNote("Metadata tables created. Edit the config below and run Generate preview → Apply.")
-    } catch (e: any) {
-      setErr(e.message)
-    } finally {
-      setBusy("")
-    }
+      const r = await api.history(); setHistory(r.rows)
+      setNote("Metadata tables created. Edit teenybase.ts then Generate preview → Apply.")
+    } catch (e: any) { setErr(e.message) } finally { setBusy("") }
+  }
+
+  async function doSaveFiles() {
+    setBusy("save-files"); setErr(null)
+    try {
+      const r = await api.saveFiles(files)
+      setFilesSaved({ ...files })
+      setNote(r.configUpdated
+        ? "Files saved. Config re-evaluated."
+        : `Files saved. (Config eval error: ${r.evalError}).`)
+    } catch (e: any) { setErr(e.message) } finally { setBusy("") }
   }
 
   async function doGenerate() {
-    setBusy("generate")
-    setErr(null)
-    setNote("")
-    let parsed: DatabaseSettings
+    setBusy("generate"); setErr(null); setNote("")
     try {
-      parsed = JSON.parse(configText)
-    } catch (e: any) {
-      setErr("Invalid JSON: " + e.message)
-      setBusy("")
-      return
-    }
-    try {
-      const g = await api.generate(parsed)
+      const g = await api.generate(files)
       setLastGen(g)
-      setAppliedConfig(g.applied)
-      const seed = joinSql(g.migrations) || "-- No schema changes. Write data-only SQL (backfill / seed) here."
-      setSqlText(seed)
-      setCustomName("")
+      const seed = joinSql(g.migrations) || "-- No schema changes. Add data-only SQL (backfill / seed) here."
+      setSqlText(seed); setCustomName("")
     } catch (e: any) {
       setErr(e.details ? `${e.message}: ${JSON.stringify(e.details, null, 2)}` : e.message)
-    } finally {
-      setBusy("")
-    }
+    } finally { setBusy("") }
   }
 
-  function resetConfig() {
-    if (appliedConfig) setConfigText(pretty(appliedConfig))
-    else if (seedConfig) setConfigText(pretty(seedConfig))
-  }
-  function resetSql() {
-    setSqlText(autoSql || "-- No schema changes.")
-  }
+  function resetSql() { setSqlText(autoSql || "-- No schema changes.") }
 
   async function doApply() {
     if (!lastGen) return
-    let parsed: DatabaseSettings
-    try {
-      parsed = JSON.parse(configText)
-    } catch (e: any) {
-      setErr("Invalid JSON: " + e.message)
-      return
-    }
     const baselineVersion = lastGen.version
     const currentSql = sqlText.trim()
     if (!sqlEdited) {
       const destructive = looksDestructive(autoSql)
       setConfirmOpen({
         title: `Apply ${lastGen.migrations.length} migration${lastGen.migrations.length === 1 ? "" : "s"} to D1`,
-        body:
-          (destructive ? "⚠ Destructive operations (DROP / TRUNCATE). Data loss possible.\n\n" : "") +
+        body: (destructive ? "⚠ Destructive operations.\n\n" : "") +
           lastGen.migrations.map((m) => `-- ${m.name}\n${m.sql.trim()}`).join("\n\n"),
         destructive,
         run: async () => {
-          setConfirmOpen(null)
-          setBusy("apply")
-          setErr(null)
+          setConfirmOpen(null); setBusy("apply"); setErr(null)
           try {
-            await api.apply({ config: parsed, baselineVersion })
+            await api.apply({ files, baselineVersion })
+            setFilesSaved({ ...files })
             await loadAll()
-            setLastGen(null)
-            setSqlText("")
-            setCustomName("")
-            const h = await api.history()
-            setHistory(h.rows)
-            setNote(`Applied. $settings stamped.`)
-            setBusy("")
+            setLastGen(null); setSqlText(""); setCustomName("")
+            const h = await api.history(); setHistory(h.rows)
+            setNote("Applied. $settings stamped.")
           } catch (e: any) {
             setErr(e.stack ? `${e.message}\n\n${e.stack}` : e.message)
-            setBusy("")
-          }
+          } finally { setBusy("") }
         },
       })
       return
     }
-
     const suffix = customName.trim() || "custom.sql"
     const finalSuffix = suffix.endsWith(".sql") ? suffix : suffix + ".sql"
     const fullCustomName = `${pad5(lastGen.startIndex)}_${finalSuffix}`
     const destructive = looksDestructive(currentSql)
     setConfirmOpen({
       title: `Apply custom SQL as "${fullCustomName}"`,
-      body:
-        (destructive ? "⚠ Destructive operations (DROP / TRUNCATE). Data loss possible.\n\n" : "") +
-        `-- ${fullCustomName}\n${currentSql}`,
+      body: (destructive ? "⚠ Destructive operations.\n\n" : "") + `-- ${fullCustomName}\n${currentSql}`,
       destructive,
       run: async () => {
-        setConfirmOpen(null)
-        setBusy("apply")
-        setErr(null)
+        setConfirmOpen(null); setBusy("apply"); setErr(null)
         try {
-          await api.apply({
-            config: parsed,
-            customSql: currentSql,
-            customName: fullCustomName,
-            baselineVersion,
-          })
+          await api.apply({ files, customSql: currentSql, customName: fullCustomName, baselineVersion })
+          setFilesSaved({ ...files })
           await loadAll()
-          setLastGen(null)
-          setSqlText("")
-          setCustomName("")
-          const h = await api.history()
-          setHistory(h.rows)
+          setLastGen(null); setSqlText(""); setCustomName("")
+          const h = await api.history(); setHistory(h.rows)
           setNote("Applied custom migration.")
-          setBusy("")
         } catch (e: any) {
           setErr(e.stack ? `${e.message}\n\n${e.stack}` : e.message)
-          setBusy("")
-        }
+        } finally { setBusy("") }
       },
     })
   }
 
-  async function doSaveUserCode() {
-    setBusy("save-user-code")
-    setErr(null)
-    try {
-      await api.saveUserCode(userCodeText)
-      setUserCodeSaved(userCodeText)
-      setNote("user.js saved. Next request picks up the new code.")
-    } catch (e: any) {
-      setErr(e.message)
-    } finally {
-      setBusy("")
+  function addFile() {
+    const name = newFileName.trim()
+    if (!name) return
+    if (name in files) { setErr(`File ${name} already exists`); return }
+    setFiles((f) => ({ ...f, [name]: "" }))
+    setActiveFile(name)
+    setNewFileName("")
+  }
+  function removeFile(name: string) {
+    if (!confirm(`Delete ${name}? (Not persisted until you Save files.)`)) return
+    setFiles((f) => {
+      const { [name]: _, ...rest } = f
+      return rest
+    })
+    if (activeFile === name) {
+      const next = Object.keys(files).find((n) => n !== name) ?? ""
+      setActiveFile(next)
     }
-  }
-  async function doSaveWorkerCode() {
-    setBusy("save-worker-code")
-    setErr(null)
-    try {
-      await api.saveWorkerCode(workerCodeText)
-      setWorkerCodeSaved(workerCodeText)
-      setNote("worker.js saved. Next request picks up the new code.")
-    } catch (e: any) {
-      setErr(e.message)
-    } finally {
-      setBusy("")
-    }
-  }
-
-  function resetUserCode() {
-    setUserCodeText(userStarterCode || userCodeSaved)
-  }
-  function resetWorkerCode() {
-    setWorkerCodeText(workerStarterCode || workerCodeSaved)
   }
 
   async function doSyncFromD1() {
-    setBusy("sync")
-    setErr(null)
-    try {
-      await api.syncFromD1()
-      setSeedConfig(null)
-      await loadAll()
-      setNote("Admin config synced from D1.")
-    } catch (e: any) {
-      setErr(e.message)
-    } finally {
-      setBusy("")
-    }
+    setBusy("sync"); setErr(null)
+    try { await api.syncFromD1(); await loadAll(); setNote("Admin config synced from D1.") }
+    catch (e: any) { setErr(e.message) } finally { setBusy("") }
   }
 
   async function doClear() {
     setConfirmOpen({
       title: "Clear DB",
-      body:
-        "Drops teenybase metadata (_ddb_internal_kv, _db_migrations) + every user table. " +
-        "Admin state (the Config + Code editors below) is preserved. After clear, re-run Setup + Apply.",
+      body: "Drops teenybase metadata + every user table. Admin state (Files + Config) is preserved. After clear, re-run Setup + Apply.",
       destructive: true,
       run: async () => {
-        setConfirmOpen(null)
-        setBusy("clear")
-        setErr(null)
+        setConfirmOpen(null); setBusy("clear"); setErr(null)
         try {
-          await api.clear()
-          await loadAll()
-          setLastGen(null)
-          setSqlText("")
-          setCustomName("")
-          setHistory([])
+          await api.clear(); await loadAll()
+          setLastGen(null); setSqlText(""); setCustomName(""); setHistory([])
           setNote("Cleared.")
-        } catch (e: any) {
-          setErr(e.message)
-        } finally {
-          setBusy("")
-        }
+        } catch (e: any) { setErr(e.message) } finally { setBusy("") }
       },
     })
   }
@@ -408,6 +307,7 @@ export function App() {
   const configMatch = status?.configMatch ?? "setup-required"
   const setupMissing = configMatch === "setup-required"
   const drifted = configMatch === "drifted"
+  const fileNames = Object.keys(files).sort()
 
   return (
     <>
@@ -429,7 +329,7 @@ export function App() {
         {setupMissing && (
           <section className="panel">
             <h2>Setup</h2>
-            <p className="hint">Metadata tables are missing. Click <strong>Setup</strong> to create them. Idempotent.</p>
+            <p className="hint">Metadata tables are missing. Setup seeds a starter file tree (teenybase.ts + worker.js + user.js + package.json), evaluates the config, and creates <code>_ddb_internal_kv</code> / <code>_db_migrations</code> / <code>_teeny_admin_state</code>. Idempotent.</p>
             <div className="actions">
               <button className="btn" onClick={doSetup} disabled={busy === "setup"}>
                 {busy === "setup" ? "Setting up…" : "Setup metadata tables"}
@@ -442,38 +342,93 @@ export function App() {
           <section className="panel sync">
             <h2>Config drift</h2>
             <p className="hint">
-              The editor&apos;s config differs from <code>$settings</code> in D1. Apply your edits via step 3 below, or pull D1&apos;s applied config into the editor.
+              The editor&apos;s teenybase.ts evaluates to something that doesn&apos;t match <code>$settings</code> in D1. Apply via Migrate below, or pull D1&apos;s applied config into admin state (teenybase.ts itself is left untouched; you&apos;ll need to reconcile manually).
             </p>
             <div className="actions">
               <button className="btn ghost" onClick={doSyncFromD1} disabled={busy === "sync"}>
-                {busy === "sync" ? "Syncing…" : "Sync editor from D1"}
+                {busy === "sync" ? "Syncing…" : "Sync admin state from D1"}
               </button>
             </div>
           </section>
         )}
 
+        {/* Files panel */}
+        <section className="panel">
+          <h2>Files</h2>
+          <p className="hint">
+            User-authored file tree. Bundled via <code>@cloudflare/worker-bundler</code> at spawn time, loaded into the dynamic worker. <strong>teenybase.ts</strong> is evaluated server-side to derive the config JSON; <strong>worker.js</strong> is the entry; <strong>user.js</strong> is the Hono app mounted at <code>/</code>. Add or remove files freely.
+          </p>
+          <div style={{ display: "flex", gap: 12 }}>
+            <aside style={{ width: 220, flexShrink: 0, display: "flex", flexDirection: "column", gap: 2 }}>
+              {fileNames.length === 0 && <div className="hint">(no files)</div>}
+              {fileNames.map((n) => (
+                <div key={n} style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                  <button
+                    className={`tab${activeFile === n ? " active" : ""}`}
+                    style={{ flex: 1, textAlign: "left", padding: "6px 10px", borderBottom: 0 }}
+                    onClick={() => setActiveFile(n)}
+                  >
+                    {n}
+                    {files[n] !== filesSaved[n] ? " •" : ""}
+                  </button>
+                  <button
+                    className="btn ghost"
+                    style={{ padding: "2px 6px", fontSize: 11 }}
+                    onClick={() => removeFile(n)}
+                    title="Delete file"
+                  >×</button>
+                </div>
+              ))}
+              <div style={{ display: "flex", gap: 4, marginTop: 8 }}>
+                <input
+                  type="text"
+                  placeholder="new file.ts"
+                  value={newFileName}
+                  onChange={(e) => setNewFileName(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") addFile() }}
+                  style={{ flex: 1, minWidth: 0 }}
+                />
+                <button className="btn ghost" onClick={addFile} style={{ padding: "4px 10px" }}>+</button>
+              </div>
+            </aside>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              {activeFile ? (
+                <Editor
+                  value={files[activeFile] ?? ""}
+                  onChange={updateActiveContent}
+                  lang={extOf(activeFile)}
+                  minHeight="420px"
+                />
+              ) : (
+                <div className="hint">Select a file or add a new one.</div>
+              )}
+            </div>
+          </div>
+          <div className="actions">
+            <button className="btn" onClick={doSaveFiles} disabled={!filesDirty || busy === "save-files"}>
+              {busy === "save-files" ? "Saving…" : "Save files"}
+            </button>
+            {filesDirty && <span className="status-msg">unsaved changes</span>}
+          </div>
+        </section>
+
+        {/* Migrate */}
         <section className="panel migrate-panel">
           <h2>Migrate</h2>
 
-          {/* Step 1 */}
           <div className={`step${setupMissing ? " pending" : ""}`}>
             <div className="step-header">
               <StepNum n={1} active={!setupMissing && !lastGen} />
-              <span className="step-title">Edit config</span>
+              <span className="step-title">Generate preview from teenybase.ts</span>
             </div>
-            <p className="hint">Edit the config below. Click <strong>Generate preview</strong> to see the auto-generated migrations.</p>
-            <Editor value={configText} onChange={setConfigText} lang="json" minHeight="360px" />
+            <p className="hint">Bundles &amp; evaluates <code>teenybase.ts</code> server-side (LOADER-run eval worker), diffs against D1&apos;s <code>$settings</code>, returns the migrations.</p>
             <div className="actions">
               <button className="btn" onClick={doGenerate} disabled={busy === "generate" || setupMissing}>
                 {busy === "generate" ? "Generating…" : "Generate preview"}
               </button>
-              <button className="btn ghost" onClick={resetConfig}>
-                Reset config
-              </button>
             </div>
           </div>
 
-          {/* Step 2 */}
           <div className={`step${lastGen ? "" : " pending"}`}>
             <div className="step-header">
               <StepNum n={2} active={!!lastGen && !sqlEdited} />
@@ -483,17 +438,14 @@ export function App() {
             {lastGen && (
               <>
                 <label>SQL to apply (edit to override — becomes one custom migration)</label>
-                <Editor value={sqlText} onChange={setSqlText} lang="sql" minHeight="220px" />
+                <Editor value={sqlText} onChange={setSqlText} lang="javascript" minHeight="220px" />
                 <div className="actions">
-                  <button className="btn ghost" onClick={resetSql}>
-                    Reset to auto-generated
-                  </button>
+                  <button className="btn ghost" onClick={resetSql}>Reset to auto-generated</button>
                 </div>
               </>
             )}
           </div>
 
-          {/* Step 3 */}
           <div className={`step${lastGen ? "" : " pending"}`}>
             <div className="step-header">
               <StepNum n={3} active={!!lastGen && (sqlEdited || !isEmptyOrCommentsOnly(sqlText))} />
@@ -503,9 +455,7 @@ export function App() {
               <>
                 <label>Files to create in _db_migrations</label>
                 <ul className="file-list">
-                  {lastGen.migrations.map((m) => (
-                    <li key={m.name}>{m.name}</li>
-                  ))}
+                  {lastGen.migrations.map((m) => <li key={m.name}>{m.name}</li>)}
                 </ul>
               </>
             )}
@@ -533,81 +483,16 @@ export function App() {
           </div>
         </section>
 
-        {/* Code — tabbed editor for worker.js + user.js */}
-        <section className="panel">
-          <h2>Code</h2>
-          <p className="hint">
-            Modules loaded into the dynamic worker on every request. <code>worker.js</code> is the entry — imports from <strong>teenybase</strong> (bare), <strong>virtual:teenybase</strong> (generated config), and <strong>./user.js</strong>. <code>user.js</code> exports a Hono app mounted at <code>/</code>. Users can replace <code>worker.js</code> to skip teenyHono (e.g. plain <code>export default &#123;fetch()&#125;</code>).
-          </p>
-          <div className="tabs">
-            <button
-              className={`tab${codeTab === "worker.js" ? " active" : ""}`}
-              onClick={() => setCodeTab("worker.js")}
-            >
-              worker.js{workerCodeDirty ? " •" : ""}
-            </button>
-            <button
-              className={`tab${codeTab === "user.js" ? " active" : ""}`}
-              onClick={() => setCodeTab("user.js")}
-            >
-              user.js{userCodeDirty ? " •" : ""}
-            </button>
-          </div>
-          {codeTab === "worker.js" ? (
-            <>
-              <Editor value={workerCodeText} onChange={setWorkerCodeText} lang="javascript" minHeight="360px" />
-              <div className="actions">
-                <button
-                  className="btn"
-                  onClick={doSaveWorkerCode}
-                  disabled={!workerCodeDirty || busy === "save-worker-code"}
-                >
-                  {busy === "save-worker-code" ? "Saving…" : "Save"}
-                </button>
-                <button className="btn ghost" onClick={resetWorkerCode}>
-                  Reset to starter
-                </button>
-                {workerCodeDirty && <span className="status-msg">unsaved changes</span>}
-              </div>
-            </>
-          ) : (
-            <>
-              <Editor value={userCodeText} onChange={setUserCodeText} lang="javascript" minHeight="360px" />
-              <div className="actions">
-                <button
-                  className="btn"
-                  onClick={doSaveUserCode}
-                  disabled={!userCodeDirty || busy === "save-user-code"}
-                >
-                  {busy === "save-user-code" ? "Saving…" : "Save"}
-                </button>
-                <button className="btn ghost" onClick={resetUserCode}>
-                  Reset to starter
-                </button>
-                {userCodeDirty && <span className="status-msg">unsaved changes</span>}
-              </div>
-            </>
-          )}
-        </section>
-
-        {/* History */}
         <section className="panel">
           <h2>Migration history</h2>
           <div className="actions">
-            <button
-              className="btn ghost"
-              onClick={() => api.history().then((r) => setHistory(r.rows)).catch((e) => setErr(e.message))}
-            >
-              Refresh
-            </button>
+            <button className="btn ghost" onClick={() => api.history().then((r) => setHistory(r.rows)).catch((e) => setErr(e.message))}>Refresh</button>
           </div>
           {history.length === 0 ? (
             <div className="status-msg">No migrations recorded.</div>
           ) : (
             <table className="history-table">
-              <thead>
-                <tr><th>idx</th><th>name</th><th>applied</th></tr>
-              </thead>
+              <thead><tr><th>idx</th><th>name</th><th>applied</th></tr></thead>
               <tbody>
                 {history.map((r) => (
                   <tr key={r.index}>
@@ -621,12 +506,9 @@ export function App() {
           )}
         </section>
 
-        {/* Danger */}
         <section className="panel danger">
           <h2>Danger zone</h2>
-          <p className="hint">
-            Drops teenybase metadata + every user table. Admin state (the Config + Code editors above) is preserved.
-          </p>
+          <p className="hint">Drops teenybase metadata + every user table. Admin state (Files + Config) is preserved.</p>
           <div className="actions">
             <button className="btn danger" onClick={doClear} disabled={busy === "clear"}>
               {busy === "clear" ? "Clearing…" : "Clear DB"}
@@ -638,11 +520,7 @@ export function App() {
       <Confirm
         open={!!confirmOpen}
         title={confirmOpen?.title || ""}
-        body={
-          confirmOpen ? (
-            <pre>{confirmOpen.body}</pre>
-          ) : null
-        }
+        body={confirmOpen ? <pre>{confirmOpen.body}</pre> : null}
         destructive={confirmOpen?.destructive || false}
         confirmLabel="Confirm & execute"
         onConfirm={() => confirmOpen?.run()}

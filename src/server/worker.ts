@@ -1,9 +1,9 @@
 // Host worker entry. Routes:
-//   /_teeny/admin/api/*  → admin Hono sub-app (setup/generate/apply/etc.)
+//   /_teeny/admin/api/*  → admin Hono sub-app
 //   /_teeny/admin/*      → SPA assets (with SPA fallback)
-//   everything else      → spawn a dynamic user worker and forward
+//   everything else      → bundle user files + spawn dynamic worker + forward
 import { createAdminRoutes } from "./admin/routes"
-import { readConfig, readUserCode, readWorkerCode } from "./admin/state"
+import { readConfig, readFiles } from "./admin/state"
 import { spawnDynamic } from "./admin/spawn"
 
 type Env = {
@@ -36,12 +36,11 @@ export default {
     }
     if (path.startsWith("/_teeny/admin")) return serveSPA(req, env)
 
-    const [config, workerCode, userCode] = await Promise.all([
+    const [files, config] = await Promise.all([
+      readFiles(env.TEENY_PRIMARY_DB),
       readConfig(env.TEENY_PRIMARY_DB),
-      readWorkerCode(env.TEENY_PRIMARY_DB),
-      readUserCode(env.TEENY_PRIMARY_DB),
     ])
-    if (!config) {
+    if (!files || !config) {
       return new Response("Setup required. Visit /_teeny/admin to initialize.", {
         status: 503,
         headers: { "content-type": "text/plain; charset=utf-8" },
@@ -51,9 +50,8 @@ export default {
       const dyn = await spawnDynamic(
         ctx,
         env,
+        files,
         config,
-        workerCode,
-        userCode,
         (ctx as any).exports || (globalThis as any).__exports
       )
       return dyn.fetch(req)

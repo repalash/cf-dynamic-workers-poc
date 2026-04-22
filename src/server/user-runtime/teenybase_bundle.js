@@ -28655,10 +28655,14 @@ export {
   PreparedQuery,
   ProcessError,
   SecretResolver,
+  TABLE_REF_TOKEN,
   USER_MIGRATION_START,
   actionLinkTemplate,
   actionTextTemplate,
+  authFields,
+  baseFields,
   baseLayout1,
+  createdTrigger,
   deleteCookie2 as deleteCookie,
   generateMigrations,
   getCookie2 as getCookie,
@@ -28669,6 +28673,9 @@ export {
   nextUserIndex,
   parseRequestBody,
   raw2 as raw,
+  fields as scaffoldFields,
+  triggers as scaffoldTriggers,
   setCookie2 as setCookie,
-  teenyHono
+  teenyHono,
+  updatedTrigger
 };

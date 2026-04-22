@@ -21,6 +21,6 @@
   "include": ["src", "test", "env.d.ts"],
   "exclude": [
     "src/server/user-runtime/bundle-entry.ts",
-    "src/server/user-runtime/starter-user-code.ts"
+    "src/server/user-runtime/starter-files.ts"
   ]
 }

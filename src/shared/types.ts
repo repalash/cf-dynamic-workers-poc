@@ -1,5 +1,4 @@
 // Types shared between server (src/server) and client (src/client).
-// Mirrors cf-ui-sample's admin API shape where applicable.
 import type { DatabaseSettings } from "teenybase"
 
 export type ConfigMatch = "match" | "drifted" | "no-applied" | "setup-required"
@@ -20,12 +19,22 @@ export interface StatusPayload {
   teenybaseVersion: string
 }
 
-export interface ConfigResponse {
+export type FilesMap = Record<string, string>
+
+export interface FilesResponse {
+  files: FilesMap
+  filesSaved: boolean
   config: DatabaseSettings | null
-  workerCode: string
-  workerCodeIsSaved: boolean
-  userCode: string
-  userCodeIsSaved: boolean
+}
+
+export interface SaveFilesResult {
+  ok: true
+  configUpdated: boolean
+  evalError: string | null
+}
+
+export interface EvalConfigResult {
+  config: DatabaseSettings
 }
 
 export interface GenerateResult {
@@ -35,6 +44,7 @@ export interface GenerateResult {
   applied: DatabaseSettings | null
   version: number | null
   startIndex: number
+  config: DatabaseSettings
 }
 
 export interface DiffChanges {
@@ -47,41 +57,29 @@ export interface DiffChanges {
       create: { name: string; type?: string }[]
       drop: { name: string; type?: string }[]
       alter: [{ name: string; type?: string }, { name: string; type?: string }][]
-      indexes?: {
-        create?: { fields: string | string[] }[]
-        drop?: { fields: string | string[] }[]
-      }
-      triggers?: {
-        create?: { name?: string }[]
-        drop?: { name?: string }[]
-      }
+      indexes?: { create?: { fields: string | string[] }[]; drop?: { fields: string | string[] }[] }
+      triggers?: { create?: { name?: string }[]; drop?: { name?: string }[] }
       fts?: unknown
     }
   ][]
 }
 
 export interface ApplyRequest {
-  config: DatabaseSettings
+  files: FilesMap
   customSql?: string
   customName?: string
   markAsApplied?: boolean
-  /** CAS token from the last /generate response. null on fresh DB. */
   baselineVersion: number | null
 }
 
 export interface ApplyResult {
   applied: string[]
   version: number
+  config: DatabaseSettings
 }
 
 export interface MigrationHistoryRow {
   index: number
   name: string
   applied_at: number
-}
-
-export interface ApiError {
-  error: string
-  details?: unknown
-  stack?: string
 }

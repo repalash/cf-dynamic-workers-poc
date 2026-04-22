@@ -50,7 +50,11 @@ maybeDescribe("e2e spawn", () => {
     const s2 = await admin("/apply", {
       method: "POST",
       body: JSON.stringify({
-        config: { tables: [], appUrl: "http://x", jwtSecret: "x" },
+        files: {
+          "teenybase.ts": "export default { tables: [], appUrl: 'http://x', jwtSecret: 'x' }",
+          "worker.js": "export default { fetch() { return new Response('ok') } }",
+          "package.json": JSON.stringify({ name: "e2e", main: "worker.js" }),
+        },
         baselineVersion: null,
       }),
     })

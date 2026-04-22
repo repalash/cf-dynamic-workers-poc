@@ -1,13 +1,14 @@
-// Typed fetch client for /_teeny/admin/api/*.
 import type {
   ApplyRequest,
   ApplyResult,
-  ConfigResponse,
+  EvalConfigResult,
+  FilesMap,
+  FilesResponse,
   GenerateResult,
   MigrationHistoryRow,
+  SaveFilesResult,
   StatusPayload,
 } from "@shared/types"
-import type { DatabaseSettings } from "teenybase"
 
 const BASE = "/_teeny/admin/api"
 
@@ -36,25 +37,17 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   status: () => req<StatusPayload>("/status"),
-  config: () => req<ConfigResponse>("/config"),
+  files: () => req<FilesResponse>("/files"),
+  saveFiles: (files: FilesMap) =>
+    req<SaveFilesResult>("/save-files", { method: "POST", body: JSON.stringify({ files }) }),
   setup: () => req<{ ok: true }>("/setup", { method: "POST" }),
-  saveUserCode: (userCode: string) =>
-    req<{ ok: true }>("/save-user-code", {
-      method: "POST",
-      body: JSON.stringify({ userCode }),
-    }),
-  saveWorkerCode: (workerCode: string) =>
-    req<{ ok: true }>("/save-worker-code", {
-      method: "POST",
-      body: JSON.stringify({ workerCode }),
-    }),
-  generate: (config: DatabaseSettings) =>
-    req<GenerateResult>("/generate", { method: "POST", body: JSON.stringify({ config }) }),
+  evalConfig: (files: FilesMap) =>
+    req<EvalConfigResult>("/eval-config", { method: "POST", body: JSON.stringify({ files }) }),
+  generate: (files: FilesMap) =>
+    req<GenerateResult>("/generate", { method: "POST", body: JSON.stringify({ files }) }),
   apply: (body: ApplyRequest) =>
     req<ApplyResult>("/apply", { method: "POST", body: JSON.stringify(body) }),
   history: () => req<{ rows: MigrationHistoryRow[] }>("/history"),
   clear: () => req<{ ok: true; dropped: number; names: string[] }>("/clear", { method: "POST" }),
   syncFromD1: () => req<{ ok: true }>("/sync-from-d1", { method: "POST" }),
-  saveConfig: (config: DatabaseSettings) =>
-    req<{ ok: true }>("/save-config", { method: "POST", body: JSON.stringify({ config }) }),
 }

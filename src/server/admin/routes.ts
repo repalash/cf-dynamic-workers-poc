@@ -1,17 +1,23 @@
-// Admin sub-app — mounted at /_teeny/admin/api/*. Routes mirror cf-ui-sample's
-// migrate_admin.js, minus the config.js-file-specific ones (this POC has no
-// config.js; admin state IS the source). Single panel flow: status → setup →
-// generate → apply → history → clear.
+// Admin sub-app — mounted at /_teeny/admin/api/*. Routes:
+//   GET  /status            — meta-table presence, $settings, drift state
+//   GET  /files             — current files + cached config
+//   POST /save-files         { files }  — persist + re-eval config
+//   POST /setup             — seed starter files, eval config, create meta tables
+//   POST /eval-config        { files }  — pure: bundle + run teenybase.ts, return config
+//   POST /generate           { files }  — eval + generate preview (no persist)
+//   POST /apply              { files, baselineVersion, customSql?, customName?, markAsApplied? }
+//   POST /sync-from-d1      — pull $settings into state.config (leaves files)
+//   GET  /history           — rows from _db_migrations
+//   POST /clear             — drop teenybase tables; preserve _teeny_admin_state
 import { Hono } from "hono"
 import { adminGate } from "./auth"
 import {
   readConfig,
-  readUserCode,
-  readWorkerCode,
+  readFiles,
   writeConfig,
-  writeUserCode,
-  writeWorkerCode,
+  writeFiles,
 } from "./state"
+import type { FilesMap } from "./state"
 import {
   setup,
   status,
@@ -21,12 +27,14 @@ import {
   syncAdminFromD1,
   history,
 } from "./migrations"
-import { STARTER_USER_CODE, STARTER_WORKER_CODE } from "./spawn"
-import { TEENYBASE_VERSION, databaseSettingsSchema } from "teenybase"
+import { evalConfigFromFiles } from "./eval-config"
+import { STARTER_FILES } from "../user-runtime/starter-files"
+import { TEENYBASE_VERSION } from "teenybase"
 
 type Env = {
   Bindings: {
     TEENY_PRIMARY_DB: D1Database
+    LOADER: any
     MIGRATE_UI_USER?: string
     MIGRATE_UI_PASSWORD?: string
     DEBUG_ERRORS?: string
@@ -38,6 +46,22 @@ function errJson(e: unknown, debug: boolean) {
   const body: Record<string, unknown> = { error: msg }
   if (debug) body.stack = (e as any)?.stack
   return body
+}
+
+function validateFiles(input: unknown): FilesMap {
+  if (!input || typeof input !== "object") {
+    throw new Error("files must be an object")
+  }
+  const out: FilesMap = {}
+  let total = 0
+  for (const [k, v] of Object.entries(input as Record<string, unknown>)) {
+    if (typeof k !== "string" || !k.length) throw new Error("file names must be non-empty strings")
+    if (typeof v !== "string") throw new Error(`file ${k}: content must be a string`)
+    out[k] = v
+    total += v.length
+  }
+  if (total > 1024 * 1024) throw new Error("total files size exceeds 1 MB")
+  return out
 }
 
 export function createAdminRoutes() {
@@ -53,49 +77,74 @@ export function createAdminRoutes() {
     }
   })
 
-  // Returns both the config and the current user.js source so the admin UI
-  // can seed both editors on first load. If user.js is missing in state, we
-  // return the starter (the same fallback spawn uses) — so editing from blank
-  // state behaves like editing the actually-running code.
-  app.get("/config", async (c) => {
-    const [cfg, workerCode, userCode] = await Promise.all([
+  app.get("/files", async (c) => {
+    const [files, config] = await Promise.all([
+      readFiles(c.env.TEENY_PRIMARY_DB),
       readConfig(c.env.TEENY_PRIMARY_DB),
-      readWorkerCode(c.env.TEENY_PRIMARY_DB),
-      readUserCode(c.env.TEENY_PRIMARY_DB),
     ])
     return c.json({
-      config: cfg,
-      workerCode: workerCode ?? STARTER_WORKER_CODE,
-      workerCodeIsSaved: workerCode !== null,
-      userCode: userCode ?? STARTER_USER_CODE,
-      userCodeIsSaved: userCode !== null,
+      files: files ?? STARTER_FILES,
+      filesSaved: files !== null,
+      config,
     })
   })
 
-  const saveStringRoute = (key: "userCode" | "workerCode", writer: (db: D1Database, s: string) => Promise<void>) =>
-    async (c: any) => {
-      let body: any
-      try {
-        body = await c.req.json()
-      } catch {
-        return c.json({ error: "Invalid JSON" }, 400)
-      }
-      const code = body?.[key]
-      if (typeof code !== "string") return c.json({ error: `${key} must be a string` }, 400)
-      if (code.length > 256 * 1024) return c.json({ error: `${key} too large (>256 KB)` }, 413)
-      await writer(c.env.TEENY_PRIMARY_DB, code)
-      return c.json({ ok: true })
+  app.post("/save-files", async (c) => {
+    let body: any
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: "Invalid JSON" }, 400)
     }
-
-  app.post("/save-user-code", saveStringRoute("userCode", writeUserCode))
-  app.post("/save-worker-code", saveStringRoute("workerCode", writeWorkerCode))
+    let files: FilesMap
+    try {
+      files = validateFiles(body?.files)
+    } catch (e) {
+      return c.json({ error: (e as Error).message }, 400)
+    }
+    await writeFiles(c.env.TEENY_PRIMARY_DB, files)
+    // Best-effort re-eval; save-files shouldn't fail on a bad teenybase.ts
+    // — user might be in the middle of editing. Report the eval error
+    // separately in the response.
+    let configUpdated = false
+    let evalError: string | null = null
+    try {
+      const cfg = await evalConfigFromFiles(c.env, files)
+      await writeConfig(c.env.TEENY_PRIMARY_DB, cfg)
+      configUpdated = true
+    } catch (e: any) {
+      evalError = e?.message ?? String(e)
+    }
+    return c.json({ ok: true, configUpdated, evalError })
+  })
 
   app.post("/setup", async (c) => {
     try {
-      await setup(c.env.TEENY_PRIMARY_DB)
+      await setup(c.env.TEENY_PRIMARY_DB, c.env as any)
       return c.json({ ok: true })
     } catch (e) {
       return c.json(errJson(e, c.env.DEBUG_ERRORS === "1"), 500)
+    }
+  })
+
+  app.post("/eval-config", async (c) => {
+    let body: any
+    try {
+      body = await c.req.json()
+    } catch {
+      return c.json({ error: "Invalid JSON" }, 400)
+    }
+    let files: FilesMap
+    try {
+      files = validateFiles(body?.files)
+    } catch (e) {
+      return c.json({ error: (e as Error).message }, 400)
+    }
+    try {
+      const cfg = await evalConfigFromFiles(c.env, files)
+      return c.json({ config: cfg })
+    } catch (e) {
+      return c.json(errJson(e, c.env.DEBUG_ERRORS === "1"), 400)
     }
   })
 
@@ -104,14 +153,16 @@ export function createAdminRoutes() {
     try {
       body = await c.req.json()
     } catch {
-      return c.json({ error: "Invalid JSON body" }, 400)
+      return c.json({ error: "Invalid JSON" }, 400)
     }
-    const parsed = databaseSettingsSchema.safeParse(body?.config)
-    if (!parsed.success) {
-      return c.json({ error: "Invalid config", details: parsed.error.format() }, 400)
+    let files: FilesMap
+    try {
+      files = validateFiles(body?.files)
+    } catch (e) {
+      return c.json({ error: (e as Error).message }, 400)
     }
     try {
-      const g = await generate(c.env.TEENY_PRIMARY_DB, parsed.data as any)
+      const g = await generate(c.env.TEENY_PRIMARY_DB, c.env as any, files)
       return c.json(g)
     } catch (e) {
       return c.json(errJson(e, c.env.DEBUG_ERRORS === "1"), 400)
@@ -123,18 +174,17 @@ export function createAdminRoutes() {
     try {
       body = await c.req.json()
     } catch {
-      return c.json({ error: "Invalid JSON body" }, 400)
+      return c.json({ error: "Invalid JSON" }, 400)
     }
-    const parsed = databaseSettingsSchema.safeParse(body?.config)
-    if (!parsed.success) {
-      return c.json({ error: "Invalid config", details: parsed.error.format() }, 400)
+    let files: FilesMap
+    try {
+      files = validateFiles(body?.files)
+    } catch (e) {
+      return c.json({ error: (e as Error).message }, 400)
     }
     if (!("baselineVersion" in (body ?? {}))) {
       return c.json(
-        {
-          error:
-            "baselineVersion is required (fetch /status first; send its .version field, or null on a fresh DB)",
-        },
+        { error: "baselineVersion is required (use the one returned by /generate)" },
         400
       )
     }
@@ -149,7 +199,7 @@ export function createAdminRoutes() {
       return c.json({ error: "markAsApplied and customSql are mutually exclusive" }, 400)
     }
     try {
-      const r = await apply(c.env.TEENY_PRIMARY_DB, parsed.data as any, {
+      const r = await apply(c.env.TEENY_PRIMARY_DB, c.env as any, files, {
         customSql: customSql || undefined,
         customName: customName || undefined,
         markAsApplied,
@@ -170,11 +220,14 @@ export function createAdminRoutes() {
     try {
       const r = await clearDB(c.env.TEENY_PRIMARY_DB)
       if (r.remaining.length) {
-        return c.json({
-          error: `Could not drop ${r.remaining.length} table(s) after dep-sort + FK-off fallback: ${r.remaining.join(", ")}. Dropped ${r.dropped.length}: ${r.dropped.join(", ")}.`,
-          dropped: r.dropped,
-          remaining: r.remaining,
-        }, 500)
+        return c.json(
+          {
+            error: `Could not drop ${r.remaining.length} table(s): ${r.remaining.join(", ")}`,
+            dropped: r.dropped,
+            remaining: r.remaining,
+          },
+          500
+        )
       }
       return c.json({ ok: true, dropped: r.dropped.length, names: r.dropped })
     } catch (e) {
@@ -189,22 +242,6 @@ export function createAdminRoutes() {
     } catch (e) {
       return c.json(errJson(e, c.env.DEBUG_ERRORS === "1"), 400)
     }
-  })
-
-  // Manually overwrite admin state (no SQL ran). Not used by the current UI
-  // but handy for programmatic workflows.
-  app.post("/save-config", async (c) => {
-    let body: any
-    try {
-      body = await c.req.json()
-    } catch {
-      return c.json({ error: "Invalid JSON" }, 400)
-    }
-    const parsed = databaseSettingsSchema.safeParse(body?.config)
-    if (!parsed.success)
-      return c.json({ error: "Invalid config", details: parsed.error.format() }, 400)
-    await writeConfig(c.env.TEENY_PRIMARY_DB, parsed.data as any)
-    return c.json({ ok: true })
   })
 
   return app

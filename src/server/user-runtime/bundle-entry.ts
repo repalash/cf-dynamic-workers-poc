@@ -16,6 +16,19 @@
 // Full teenybase cf-ui surface (migration raw APIs, $Database, teenyHono, etc.)
 export * from "../../../../teenybase/src/bundle/cf-ui-entry"
 
+// Scaffold field helpers — re-exported so user teenybase.ts configs can do
+// `import { baseFields, authFields } from "teenybase"` (without the subpath).
+// Matches the ergonomics users expect when pasting from notes-sample.
+export {
+  baseFields,
+  authFields,
+  createdTrigger,
+  updatedTrigger,
+  fields as scaffoldFields,
+  triggers as scaffoldTriggers,
+  TABLE_REF_TOKEN,
+} from "../../../../teenybase/src/scaffolds/fields"
+
 // hono/html — string-tagged template engine for SSR. Dynamic workers can't
 // run JSX through LOADER.load (no TS/TSX transform), so user.js uses html`…`
 // instead of <JSX>.

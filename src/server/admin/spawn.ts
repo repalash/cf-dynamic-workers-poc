@@ -1,63 +1,76 @@
-// Spawns the dynamic user worker via LOADER.load(). Module layout (matches
-// packages/notes-sample's structure):
+// Spawns the dynamic user worker. The user owns an arbitrary file tree
+// (stored as Record<string, string> in _teeny_admin_state.files). On every
+// request we:
 //
-//   "worker.js"          — user-editable entry. Does teenybase setup +
-//                          app.route("/", userApp). LOADER treats this as
-//                          the mainModule.
-//   "./user.js"          — user-editable Hono app. Exports default.
-//   "virtual:teenybase"  — generated config module (export default <config>).
-//                          Same name teenybase's CLI uses — the convention
-//                          is preserved for mental-model parity even though
-//                          here it's an actual runtime module-map key, not
-//                          a build-time alias.
-//   "teenybase"          — the teenybase bundle, keyed as a bare specifier
-//                          so user code writes `import ... from "teenybase"`
-//                          like they would in a normal project.
+//   1. createWorker({ files }) — @cloudflare/worker-bundler runs esbuild-wasm
+//      inside workerd. Resolves relative imports across the user's files,
+//      strips TS types, emits { mainModule, modules } ready for LOADER.
+//      "teenybase" is declared external so it doesn't get bundled — we ship
+//      it as a separate module entry.
+//   2. LOADER.load({ modules: bundled.modules ∪ { "teenybase": <bundle>,
+//      "virtual:teenybase": <config> }, env: { TEENY_PRIMARY_DB: d1Stub } }).
 //
-// Workerd's WorkerLoader resolves by exact string match against the modules
-// map — keys don't have to be relative paths.
+// D1 access crosses the LOADER boundary as an RPC stub; the user's worker.js
+// wraps it in a plain {run, runBatch} adapter (see starter-files.ts).
 import type { DatabaseSettings } from "teenybase"
-// @ts-ignore — ?raw imports resolved by Vite at build time
+import { createWorker } from "@cloudflare/worker-bundler"
+import type { FilesMap } from "./state"
+// @ts-ignore — ?raw import resolved at build time
 import teenybaseBundle from "../user-runtime/teenybase_bundle.js?raw"
-// @ts-ignore
-import starterWorkerCode from "../user-runtime/starter-worker-code.ts?raw"
-// @ts-ignore
-import starterUserCode from "../user-runtime/starter-user-code.ts?raw"
 
-export const STARTER_WORKER_CODE: string = starterWorkerCode as string
-export const STARTER_USER_CODE: string = starterUserCode as string
+export { STARTER_FILES } from "../user-runtime/starter-files"
 
 const COMPAT_DATE = "2026-01-28"
+const EXTERNALS = ["teenybase", "virtual:teenybase"]
 
 type Env = {
   TEENY_PRIMARY_DB: D1Database
   LOADER: any
 }
 
+/**
+ * Bundles the user's file tree plus a virtual:teenybase config module.
+ * teenybase stays external so the bundler doesn't try to resolve it; we
+ * ship our own pre-built bundle at the "teenybase" specifier via the
+ * modules map.
+ */
+export async function bundleUserFiles(files: FilesMap, config: DatabaseSettings) {
+  // Synthesize the config module as JS so worker-bundler resolves it through
+  // relative imports if anything inside `files` references `virtual:teenybase`.
+  // It's externalized below, so the bundler leaves the specifier alone and the
+  // module comes from the `modules` map we hand to LOADER.
+  return await createWorker({
+    files,
+    bundle: true,
+    externals: EXTERNALS,
+  })
+}
+
 export async function spawnDynamic(
   ctx: ExecutionContext,
   env: Env,
+  files: FilesMap,
   config: DatabaseSettings,
-  workerCode: string | null,
-  userCode: string | null,
   exports: { D1RPC: any }
 ) {
   const d1Stub = exports.D1RPC({})
+  const bundled = await bundleUserFiles(files, config)
+
   const configModule = `export default ${JSON.stringify(config)};\n`
-  // Workerd requires module names to end in .js/.py unless the value is the
-  // { js | cjs | text | ... } object form. We use the object form so the
-  // specifiers ("teenybase", "virtual:teenybase") can be bare/virtual — that
-  // matches the CLI convention notes-sample uses at build time.
+
+  // Combine bundler output + our externalized modules. LOADER resolves by
+  // exact string match against the modules map; both bare ("teenybase") and
+  // virtual: prefixes require the object-form { js: "..." } since workerd
+  // otherwise rejects specifiers that don't end in .js/.py.
+  const modules: Record<string, any> = { ...bundled.modules }
+  modules["teenybase"] = { js: teenybaseBundle as string }
+  modules["virtual:teenybase"] = { js: configModule }
+
   const worker = env.LOADER.load({
     compatibilityDate: COMPAT_DATE,
     compatibilityFlags: ["nodejs_compat"],
-    mainModule: "worker.js",
-    modules: {
-      "worker.js": { js: workerCode && workerCode.trim() ? workerCode : STARTER_WORKER_CODE },
-      "./user.js": { js: userCode && userCode.trim() ? userCode : STARTER_USER_CODE },
-      "virtual:teenybase": { js: configModule },
-      "teenybase": { js: teenybaseBundle as string },
-    },
+    mainModule: bundled.mainModule,
+    modules,
     env: { TEENY_PRIMARY_DB: d1Stub },
     globalOutbound: null,
   })
