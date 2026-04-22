@@ -1,9 +1,9 @@
+@import url("https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap");
+
 /* Design system ported from packages/cf-ui-sample/migrate_ui.html.js.
    Keep Tailwind import only for CodeMirror's host/layout utilities; the UI
    itself uses the class names below (panel, step, status-row, etc.). */
 @import "tailwindcss";
-
-@import url("https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap");
 
 *,
 *::before,

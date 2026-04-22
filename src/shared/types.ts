@@ -22,15 +22,10 @@ export interface StatusPayload {
 export type FilesMap = Record<string, string>
 
 export interface FilesResponse {
-  files: FilesMap
-  filesSaved: boolean
+  live: FilesMap | null       // null if never deployed
+  draft: FilesMap | null      // null if no draft saved (= live is source of truth)
+  editor: FilesMap            // convenience: draft ?? live ?? starter
   config: DatabaseSettings | null
-}
-
-export interface SaveFilesResult {
-  ok: true
-  configUpdated: boolean
-  evalError: string | null
 }
 
 export interface EvalConfigResult {
@@ -64,18 +59,18 @@ export interface DiffChanges {
   ][]
 }
 
-export interface ApplyRequest {
+export interface DeployRequest {
   files: FilesMap
   customSql?: string
   customName?: string
-  markAsApplied?: boolean
   baselineVersion: number | null
 }
 
-export interface ApplyResult {
+export interface DeployResult {
   applied: string[]
   version: number
   config: DatabaseSettings
+  promotedFiles: boolean
 }
 
 export interface MigrationHistoryRow {

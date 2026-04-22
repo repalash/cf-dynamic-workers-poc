@@ -21,7 +21,16 @@ import {
   hasIdentitiesExtension,
 } from "../user-runtime/teenybase_bundle.js"
 import type { DatabaseSettings } from "teenybase"
-import { ADMIN_STATE_DDL, readConfig, readFiles, writeConfig, writeFiles } from "./state"
+import {
+  ADMIN_STATE_DDL,
+  deleteDraftFiles,
+  readConfig,
+  readDraftFiles,
+  readFiles,
+  writeConfig,
+  writeDraftFiles,
+  writeFiles,
+} from "./state"
 import type { FilesMap } from "./state"
 import { evalConfigFromFiles } from "./eval-config"
 import { STARTER_FILES } from "../user-runtime/starter-files"
@@ -33,16 +42,22 @@ export interface MetaTableStatus {
 }
 
 export async function metaTableStatus(db: D1Database): Promise<MetaTableStatus> {
-  const rows = await db
-    .prepare(
-      "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('_ddb_internal_kv','_db_migrations','_teeny_admin_state')"
-    )
-    .all<{ name: string }>()
-  const names = new Set((rows.results ?? []).map((r) => r.name))
-  return {
-    _ddb_internal_kv: names.has("_ddb_internal_kv"),
-    _db_migrations: names.has("_db_migrations"),
-    _teeny_admin_state: names.has("_teeny_admin_state"),
+  try {
+    const rows = await db
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('_ddb_internal_kv','_db_migrations','_teeny_admin_state')"
+      )
+      .all<{ name: string }>()
+    const names = new Set((rows.results ?? []).map((r) => r.name))
+    return {
+      _ddb_internal_kv: names.has("_ddb_internal_kv"),
+      _db_migrations: names.has("_db_migrations"),
+      _teeny_admin_state: names.has("_teeny_admin_state"),
+    }
+  } catch {
+    // Transient D1 error (cold start or connection hiccup). Report as missing
+    // so the UI shows a sane setup-required state; next poll will pick up.
+    return { _ddb_internal_kv: false, _db_migrations: false, _teeny_admin_state: false }
   }
 }
 
@@ -125,26 +140,25 @@ export async function status(db: D1Database, teenybaseVersion: string): Promise<
 }
 
 /**
- * Creates the three metadata tables. Seeds STARTER_FILES (only if no files
- * are stored yet). Evaluates teenybase.ts to get the initial config and
- * persists it. Idempotent — safe to re-run.
+ * Creates the three metadata tables. Seeds STARTER_FILES into _draft_ (live
+ * stays null — deploy is a separate action). Idempotent — safe to re-run.
+ *
+ * Does NOT evaluate teenybase.ts. First deploy handles that. Setup is
+ * intentionally fast and no-throw on user-code issues.
  */
-export async function setup(db: D1Database, env: { LOADER: any }): Promise<void> {
+export async function setup(db: D1Database): Promise<void> {
   await db.exec(ADMIN_STATE_DDL.replace(/\n/g, " "))
 
-  // Seed files if empty.
-  let files = await readFiles(db)
-  if (!files) {
-    files = { ...STARTER_FILES }
-    await writeFiles(db, files)
-  }
+  // Seed draft with the starter tree if no draft yet.
+  const existingDraft = await readDraftFiles(db)
+  if (!existingDraft) await writeDraftFiles(db, { ...STARTER_FILES })
 
-  // Evaluate teenybase.ts to derive the config, if no config is cached yet.
-  const existingConfig = await readConfig(db)
-  const cfg = existingConfig ?? (await evalConfigFromFiles(env, files))
-  if (!existingConfig) await writeConfig(db, cfg)
-
-  const { kv, helper, identities } = buildAdminDb(db, cfg)
+  // Use STARTER_CONFIG_SHAPE as a placeholder config for infra setup — teenybase
+  // needs SOMETHING to know which kv/identities tables to create, but the real
+  // config for user tables gets stamped by the first deploy. An empty-tables
+  // shape is enough because no identities extension is on.
+  const placeholderConfig = { tables: [] } as unknown as DatabaseSettings
+  const { kv, helper, identities } = buildAdminDb(db, placeholderConfig)
 
   const kvEntry = await kv.setup(0)
   await helper.setup(0)
@@ -199,29 +213,46 @@ export async function generate(
   }
 }
 
-export interface ApplyOpts {
+export interface DeployOpts {
+  /** Optional custom SQL to run as a single named migration alongside (or instead of) auto-generated schema migrations. */
   customSql?: string
+  /** Required if customSql is present. Must match NNNNN_<name>.sql. */
   customName?: string
-  markAsApplied?: boolean
+  /** CAS token from the last /generate call. */
   baselineVersion: number | null
 }
 
-export interface ApplyResult {
+export interface DeployResult {
   applied: string[]
   version: number
   config: DatabaseSettings
+  promotedFiles: boolean
 }
 
 /**
- * Apply: re-evaluates teenybase.ts from the supplied files, bundles migrations
- * from the diff, applies + stamps $settings, and persists files + config.
+ * Atomic deploy: re-evaluate teenybase.ts, run schema + custom migrations,
+ * stamp $settings + $settings_version (CAS-protected), promote draft files
+ * to live, and update the cached config. Single DB-batch for the schema side
+ * (via MigrationHelperRaw.apply) means any failure aborts before the files
+ * become live.
+ *
+ * Three effective modes fall out of the inputs, no flag needed:
+ *   - custom SQL provided:            runs that SQL as ONE named migration
+ *   - no custom SQL, schema changed:  runs auto-generated migrations
+ *   - no custom SQL, no schema diff:  migrations=[] → helper.apply still
+ *                                      writes $settings + bumps version
+ *                                      (markAsApplied-equivalent), useful
+ *                                      for code-only deploys
+ *
+ * If draft files equal live files, promotedFiles=false in the result; the
+ * version still bumps to keep the CAS counter monotonic.
  */
-export async function apply(
+export async function deploy(
   db: D1Database,
   env: { LOADER: any },
   files: FilesMap,
-  opts: ApplyOpts
-): Promise<ApplyResult> {
+  opts: DeployOpts
+): Promise<DeployResult> {
   const next = await evalConfigFromFiles(env, files)
   const { helper } = buildAdminDb(db, next)
 
@@ -235,7 +266,7 @@ export async function apply(
       throw new Error(`customName prefix < ${USER_MIGRATION_START} is reserved for infra migrations.`)
     }
     migrations = [{ name: opts.customName, sql: opts.customSql }]
-  } else if (!opts.markAsApplied) {
+  } else {
     const list = await helper.list().catch(() => [])
     const startIndex = nextUserIndex(list)
     const { settings: applied } = await dbState(db, next)
@@ -246,18 +277,23 @@ export async function apply(
   }
 
   const nextVersion = ((opts.baselineVersion ?? -1) as number) + 1
-  const nextStamped: DatabaseSettings = {
-    ...(next as any),
-    version: nextVersion,
-  }
+  const nextStamped: DatabaseSettings = { ...(next as any), version: nextVersion }
   await helper.apply(migrations, nextStamped as any, opts.baselineVersion)
 
-  // Persist files + compiled config so future reads (e.g. runtime spawn, status)
-  // reflect what we just stamped.
+  // Promote draft → live + update cached config. We also clear the drafts row
+  // since the editor's source-of-truth is now the live tree.
+  const prevLive = await readFiles(db)
+  const samePromote = prevLive ? JSON.stringify(prevLive) === JSON.stringify(files) : false
   await writeFiles(db, files)
   await writeConfig(db, nextStamped)
+  await deleteDraftFiles(db)
 
-  return { applied: migrations.map((m) => m.name), version: nextVersion, config: nextStamped }
+  return {
+    applied: migrations.map((m) => m.name),
+    version: nextVersion,
+    config: nextStamped,
+    promotedFiles: !samePromote,
+  }
 }
 
 export async function clearDB(db: D1Database): Promise<{ dropped: string[]; remaining: string[] }> {

@@ -15,10 +15,16 @@ CREATE TABLE IF NOT EXISTS _teeny_admin_state (
 `.trim()
 
 export async function adminStateTableExists(db: D1Database): Promise<boolean> {
-  const row = await db
-    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='_teeny_admin_state'")
-    .first()
-  return row !== null
+  try {
+    const row = await db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='_teeny_admin_state'")
+      .first()
+    return row !== null
+  } catch {
+    // D1 transient (happens on dev-server cold start) — treat as "not ready"
+    // which downstream callers handle as setup-required / null.
+    return false
+  }
 }
 
 async function readKey(db: D1Database, key: string): Promise<string | null> {
@@ -39,8 +45,8 @@ async function writeKey(db: D1Database, key: string, value: string): Promise<voi
 
 export type FilesMap = Record<string, string>
 
-export async function readFiles(db: D1Database): Promise<FilesMap | null> {
-  const s = await readKey(db, "files")
+async function readFilesKey(db: D1Database, key: "files" | "files_draft"): Promise<FilesMap | null> {
+  const s = await readKey(db, key)
   if (!s) return null
   try {
     const parsed = JSON.parse(s)
@@ -50,8 +56,24 @@ export async function readFiles(db: D1Database): Promise<FilesMap | null> {
   }
 }
 
+// Live files — the deployed tree that the runtime isolate reads. Updated
+// atomically by deploy(), never by the editor.
+export const readFiles = (db: D1Database) => readFilesKey(db, "files")
 export async function writeFiles(db: D1Database, files: FilesMap): Promise<void> {
   await writeKey(db, "files", JSON.stringify(files))
+}
+
+// Draft files — the editor's working copy. Persisted so a refresh doesn't
+// lose edits, but never read by the runtime. Deploy promotes draft → live.
+export const readDraftFiles = (db: D1Database) => readFilesKey(db, "files_draft")
+export async function writeDraftFiles(db: D1Database, files: FilesMap): Promise<void> {
+  await writeKey(db, "files_draft", JSON.stringify(files))
+}
+export async function deleteDraftFiles(db: D1Database): Promise<void> {
+  await db
+    .prepare("DELETE FROM _teeny_admin_state WHERE key='files_draft'")
+    .run()
+    .catch(() => {})
 }
 
 export async function readConfig(db: D1Database): Promise<DatabaseSettings | null> {

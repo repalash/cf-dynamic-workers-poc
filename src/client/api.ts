@@ -1,12 +1,11 @@
 import type {
-  ApplyRequest,
-  ApplyResult,
+  DeployRequest,
+  DeployResult,
   EvalConfigResult,
   FilesMap,
   FilesResponse,
   GenerateResult,
   MigrationHistoryRow,
-  SaveFilesResult,
   StatusPayload,
 } from "@shared/types"
 
@@ -16,16 +15,11 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const r = await fetch(BASE + path, {
     credentials: "include",
     ...init,
-    headers: {
-      "content-type": "application/json",
-      ...(init?.headers || {}),
-    },
+    headers: { "content-type": "application/json", ...(init?.headers || {}) },
   })
   if (!r.ok) {
     let body: any = null
-    try {
-      body = await r.json()
-    } catch {}
+    try { body = await r.json() } catch {}
     const err: any = new Error(body?.error || `HTTP ${r.status}`)
     err.status = r.status
     err.details = body?.details
@@ -38,15 +32,16 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   status: () => req<StatusPayload>("/status"),
   files: () => req<FilesResponse>("/files"),
-  saveFiles: (files: FilesMap) =>
-    req<SaveFilesResult>("/save-files", { method: "POST", body: JSON.stringify({ files }) }),
+  saveDraft: (files: FilesMap) =>
+    req<{ ok: true }>("/save-draft", { method: "POST", body: JSON.stringify({ files }) }),
+  revertDraft: () => req<{ ok: true }>("/revert-draft", { method: "POST" }),
   setup: () => req<{ ok: true }>("/setup", { method: "POST" }),
   evalConfig: (files: FilesMap) =>
     req<EvalConfigResult>("/eval-config", { method: "POST", body: JSON.stringify({ files }) }),
   generate: (files: FilesMap) =>
     req<GenerateResult>("/generate", { method: "POST", body: JSON.stringify({ files }) }),
-  apply: (body: ApplyRequest) =>
-    req<ApplyResult>("/apply", { method: "POST", body: JSON.stringify(body) }),
+  deploy: (body: DeployRequest) =>
+    req<DeployResult>("/deploy", { method: "POST", body: JSON.stringify(body) }),
   history: () => req<{ rows: MigrationHistoryRow[] }>("/history"),
   clear: () => req<{ ok: true; dropped: number; names: string[] }>("/clear", { method: "POST" }),
   syncFromD1: () => req<{ ok: true }>("/sync-from-d1", { method: "POST" }),

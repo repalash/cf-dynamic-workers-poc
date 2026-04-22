@@ -2,8 +2,10 @@
 //   /_teeny/admin/api/*  → admin Hono sub-app
 //   /_teeny/admin/*      → SPA assets (with SPA fallback)
 //   everything else      → bundle user files + spawn dynamic worker + forward
+import type { DatabaseSettings } from "teenybase"
 import { createAdminRoutes } from "./admin/routes"
 import { readConfig, readFiles } from "./admin/state"
+import type { FilesMap } from "./admin/state"
 import { spawnDynamic } from "./admin/spawn"
 
 type Env = {
@@ -36,10 +38,17 @@ export default {
     }
     if (path.startsWith("/_teeny/admin")) return serveSPA(req, env)
 
-    const [files, config] = await Promise.all([
-      readFiles(env.TEENY_PRIMARY_DB),
-      readConfig(env.TEENY_PRIMARY_DB),
-    ])
+    let files: FilesMap | null = null
+    let config: DatabaseSettings | null = null
+    try {
+      ;[files, config] = await Promise.all([
+        readFiles(env.TEENY_PRIMARY_DB),
+        readConfig(env.TEENY_PRIMARY_DB),
+      ])
+    } catch {
+      // D1 transient (admin state not created, or cold-start). Fall through
+      // to the 503 below; explicit catch keeps Vite HMR overlay from showing.
+    }
     if (!files || !config) {
       return new Response("Setup required. Visit /_teeny/admin to initialize.", {
         status: 503,

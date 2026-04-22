@@ -1,17 +1,12 @@
-// Spawns the dynamic user worker. The user owns an arbitrary file tree
-// (stored as Record<string, string> in _teeny_admin_state.files). On every
-// request we:
+// Spawns the dynamic user worker via the LOADER binding. Uses LOADER.get(id,
+// factory) for caching: the id encodes the stamped $settings_version + a hash
+// of the live files + teenybase bundle identity. Same id → reused isolate
+// (fast). Deploy bumps the version (always) and often the files too → new id
+// → fresh isolate next request.
 //
-//   1. createWorker({ files }) — @cloudflare/worker-bundler runs esbuild-wasm
-//      inside workerd. Resolves relative imports across the user's files,
-//      strips TS types, emits { mainModule, modules } ready for LOADER.
-//      "teenybase" is declared external so it doesn't get bundled — we ship
-//      it as a separate module entry.
-//   2. LOADER.load({ modules: bundled.modules ∪ { "teenybase": <bundle>,
-//      "virtual:teenybase": <config> }, env: { TEENY_PRIMARY_DB: d1Stub } }).
-//
-// D1 access crosses the LOADER boundary as an RPC stub; the user's worker.js
-// wraps it in a plain {run, runBatch} adapter (see starter-files.ts).
+// The config module's default export includes `.version` so teenybase's
+// $Database can enforce the DDB_SETTINGS_VERSION header check on inbound
+// requests. That's defense-in-depth against any cache-eviction race.
 import type { DatabaseSettings } from "teenybase"
 import { createWorker } from "@cloudflare/worker-bundler"
 import type { FilesMap } from "./state"
@@ -29,50 +24,56 @@ type Env = {
 }
 
 /**
- * Bundles the user's file tree plus a virtual:teenybase config module.
- * teenybase stays external so the bundler doesn't try to resolve it; we
- * ship our own pre-built bundle at the "teenybase" specifier via the
- * modules map.
+ * Hex-encoded sha256 of an input, truncated to 16 chars. Good enough for a
+ * cache key — collisions are not security-critical here.
  */
-export async function bundleUserFiles(files: FilesMap, config: DatabaseSettings) {
-  // Synthesize the config module as JS so worker-bundler resolves it through
-  // relative imports if anything inside `files` references `virtual:teenybase`.
-  // It's externalized below, so the bundler leaves the specifier alone and the
-  // module comes from the `modules` map we hand to LOADER.
-  return await createWorker({
-    files,
-    bundle: true,
-    externals: EXTERNALS,
-  })
+async function shortHash(input: string): Promise<string> {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input))
+  return Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, "0"))
+    .join("")
+    .slice(0, 16)
 }
 
+async function cacheKey(config: DatabaseSettings, files: FilesMap): Promise<string> {
+  const sortedFiles = Object.keys(files).sort().map((k) => [k, files[k]] as const)
+  const hash = await shortHash(JSON.stringify(sortedFiles))
+  const v = (config as any).version ?? 0
+  return `teenyuser-v${v}-${hash}`
+}
+
+/**
+ * Bundles the user's file tree and returns a LOADER-ready Fetcher. Cached
+ * under an id derived from config.version + files hash, so repeat requests
+ * with no change reuse the isolate.
+ */
 export async function spawnDynamic(
-  ctx: ExecutionContext,
+  _ctx: ExecutionContext,
   env: Env,
   files: FilesMap,
   config: DatabaseSettings,
   exports: { D1RPC: any }
 ) {
   const d1Stub = exports.D1RPC({})
-  const bundled = await bundleUserFiles(files, config)
+  const id = await cacheKey(config, files)
 
-  const configModule = `export default ${JSON.stringify(config)};\n`
-
-  // Combine bundler output + our externalized modules. LOADER resolves by
-  // exact string match against the modules map; both bare ("teenybase") and
-  // virtual: prefixes require the object-form { js: "..." } since workerd
-  // otherwise rejects specifiers that don't end in .js/.py.
-  const modules: Record<string, any> = { ...bundled.modules }
-  modules["teenybase"] = { js: teenybaseBundle as string }
-  modules["virtual:teenybase"] = { js: configModule }
-
-  const worker = env.LOADER.load({
-    compatibilityDate: COMPAT_DATE,
-    compatibilityFlags: ["nodejs_compat"],
-    mainModule: bundled.mainModule,
-    modules,
-    env: { TEENY_PRIMARY_DB: d1Stub },
-    globalOutbound: null,
+  const worker = env.LOADER.get(id, async () => {
+    const bundled = await createWorker({
+      files,
+      bundle: true,
+      externals: EXTERNALS,
+    })
+    const configModule = `export default ${JSON.stringify(config)};\n`
+    const modules: Record<string, any> = { ...bundled.modules }
+    modules["teenybase"] = { js: teenybaseBundle as string }
+    modules["virtual:teenybase"] = { js: configModule }
+    return {
+      compatibilityDate: COMPAT_DATE,
+      compatibilityFlags: ["nodejs_compat"],
+      mainModule: bundled.mainModule,
+      modules,
+      env: { TEENY_PRIMARY_DB: d1Stub },
+      globalOutbound: null,
+    }
   })
   return worker.getEntrypoint()
 }

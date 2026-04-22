@@ -1,31 +1,37 @@
-// Admin sub-app — mounted at /_teeny/admin/api/*. Routes:
-//   GET  /status            — meta-table presence, $settings, drift state
-//   GET  /files             — current files + cached config
-//   POST /save-files         { files }  — persist + re-eval config
-//   POST /setup             — seed starter files, eval config, create meta tables
-//   POST /eval-config        { files }  — pure: bundle + run teenybase.ts, return config
-//   POST /generate           { files }  — eval + generate preview (no persist)
-//   POST /apply              { files, baselineVersion, customSql?, customName?, markAsApplied? }
-//   POST /sync-from-d1      — pull $settings into state.config (leaves files)
-//   GET  /history           — rows from _db_migrations
-//   POST /clear             — drop teenybase tables; preserve _teeny_admin_state
+// Admin sub-app — mounted at /_teeny/admin/api/*.
+//
+// Flow: edit drafts → Generate preview → Deploy (atomic).
+//
+//   GET  /status            — meta tables + drift + migration count + version
+//   GET  /files             — { live, draft, config } — draft ?? live ?? starter
+//   POST /save-draft         { files }  — persist drafts
+//   POST /revert-draft      — delete draft row (editor re-seeds from live)
+//   POST /setup             — seed starter drafts + create meta tables
+//   POST /eval-config        { files }  — bundle + run teenybase.ts, return JSON
+//   POST /generate           { files }  — eval + diff; no writes
+//   POST /deploy             { files, baselineVersion, customSql?, customName? }
+//                             atomic: run migrations + promote files + bump version
+//   POST /sync-from-d1      — pull $settings into state.config
+//   GET  /history           — _db_migrations rows
+//   POST /clear             — drop user + teenybase tables (preserve admin state)
 import { Hono } from "hono"
 import { adminGate } from "./auth"
 import {
   readConfig,
+  readDraftFiles,
   readFiles,
-  writeConfig,
-  writeFiles,
+  writeDraftFiles,
+  deleteDraftFiles,
 } from "./state"
 import type { FilesMap } from "./state"
 import {
+  clearDB,
+  deploy,
+  generate,
+  history,
   setup,
   status,
-  generate,
-  apply,
-  clearDB,
   syncAdminFromD1,
-  history,
 } from "./migrations"
 import { evalConfigFromFiles } from "./eval-config"
 import { STARTER_FILES } from "../user-runtime/starter-files"
@@ -49,9 +55,7 @@ function errJson(e: unknown, debug: boolean) {
 }
 
 function validateFiles(input: unknown): FilesMap {
-  if (!input || typeof input !== "object") {
-    throw new Error("files must be an object")
-  }
+  if (!input || typeof input !== "object") throw new Error("files must be an object")
   const out: FilesMap = {}
   let total = 0
   for (const [k, v] of Object.entries(input as Record<string, unknown>)) {
@@ -78,18 +82,24 @@ export function createAdminRoutes() {
   })
 
   app.get("/files", async (c) => {
-    const [files, config] = await Promise.all([
+    const [live, draft, config] = await Promise.all([
       readFiles(c.env.TEENY_PRIMARY_DB),
+      readDraftFiles(c.env.TEENY_PRIMARY_DB),
       readConfig(c.env.TEENY_PRIMARY_DB),
     ])
+    // If there's no live deploy yet and no draft, the editor should get the
+    // starter so the user has something to edit. UI distinguishes "live is
+    // null" (nothing deployed yet) from "draft is null" (nothing unsaved).
+    const editor = draft ?? live ?? STARTER_FILES
     return c.json({
-      files: files ?? STARTER_FILES,
-      filesSaved: files !== null,
+      live,
+      draft,
+      editor,
       config,
     })
   })
 
-  app.post("/save-files", async (c) => {
+  app.post("/save-draft", async (c) => {
     let body: any
     try {
       body = await c.req.json()
@@ -102,25 +112,29 @@ export function createAdminRoutes() {
     } catch (e) {
       return c.json({ error: (e as Error).message }, 400)
     }
-    await writeFiles(c.env.TEENY_PRIMARY_DB, files)
-    // Best-effort re-eval; save-files shouldn't fail on a bad teenybase.ts
-    // — user might be in the middle of editing. Report the eval error
-    // separately in the response.
-    let configUpdated = false
-    let evalError: string | null = null
-    try {
-      const cfg = await evalConfigFromFiles(c.env, files)
-      await writeConfig(c.env.TEENY_PRIMARY_DB, cfg)
-      configUpdated = true
-    } catch (e: any) {
-      evalError = e?.message ?? String(e)
-    }
-    return c.json({ ok: true, configUpdated, evalError })
+    await writeDraftFiles(c.env.TEENY_PRIMARY_DB, files)
+    return c.json({ ok: true })
+  })
+
+  app.post("/revert-draft", async (c) => {
+    await deleteDraftFiles(c.env.TEENY_PRIMARY_DB)
+    return c.json({ ok: true })
+  })
+
+  // Test-only: wipe admin state rows (drafts + live files + config) so the
+  // next request behaves like a fresh install. Does NOT drop user tables —
+  // pair with /clear for that. Not exposed in the UI.
+  app.post("/_reset-admin-state", async (c) => {
+    await c.env.TEENY_PRIMARY_DB
+      .prepare("DELETE FROM _teeny_admin_state")
+      .run()
+      .catch(() => {})
+    return c.json({ ok: true })
   })
 
   app.post("/setup", async (c) => {
     try {
-      await setup(c.env.TEENY_PRIMARY_DB, c.env as any)
+      await setup(c.env.TEENY_PRIMARY_DB)
       return c.json({ ok: true })
     } catch (e) {
       return c.json(errJson(e, c.env.DEBUG_ERRORS === "1"), 500)
@@ -169,7 +183,7 @@ export function createAdminRoutes() {
     }
   })
 
-  app.post("/apply", async (c) => {
+  app.post("/deploy", async (c) => {
     let body: any
     try {
       body = await c.req.json()
@@ -183,10 +197,7 @@ export function createAdminRoutes() {
       return c.json({ error: (e as Error).message }, 400)
     }
     if (!("baselineVersion" in (body ?? {}))) {
-      return c.json(
-        { error: "baselineVersion is required (use the one returned by /generate)" },
-        400
-      )
+      return c.json({ error: "baselineVersion is required" }, 400)
     }
     const baselineVersion = body.baselineVersion
     if (baselineVersion !== null && typeof baselineVersion !== "number") {
@@ -194,15 +205,10 @@ export function createAdminRoutes() {
     }
     const customSql = typeof body.customSql === "string" ? body.customSql.trim() : undefined
     const customName = typeof body.customName === "string" ? body.customName.trim() : undefined
-    const markAsApplied = body.markAsApplied === true
-    if (customSql && markAsApplied) {
-      return c.json({ error: "markAsApplied and customSql are mutually exclusive" }, 400)
-    }
     try {
-      const r = await apply(c.env.TEENY_PRIMARY_DB, c.env as any, files, {
+      const r = await deploy(c.env.TEENY_PRIMARY_DB, c.env as any, files, {
         customSql: customSql || undefined,
         customName: customName || undefined,
-        markAsApplied,
         baselineVersion,
       })
       return c.json(r)
@@ -221,11 +227,7 @@ export function createAdminRoutes() {
       const r = await clearDB(c.env.TEENY_PRIMARY_DB)
       if (r.remaining.length) {
         return c.json(
-          {
-            error: `Could not drop ${r.remaining.length} table(s): ${r.remaining.join(", ")}`,
-            dropped: r.dropped,
-            remaining: r.remaining,
-          },
+          { error: `Could not drop ${r.remaining.length} table(s): ${r.remaining.join(", ")}`, ...r },
           500
         )
       }
