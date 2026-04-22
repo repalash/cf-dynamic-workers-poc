@@ -1,10 +1,18 @@
-// src/server/admin/auth.ts
 import type { Context, Next } from "hono"
 
 type GateEnv = {
   TEENY_PRIMARY_DB: D1Database
   MIGRATE_UI_USER?: string
   MIGRATE_UI_PASSWORD?: string
+}
+
+// Memo: creds come from env and are constant per isolate, so we only btoa once.
+let memo: { user: string; pwd: string; expected: string } | null = null
+function expectedHeader(user: string, pwd: string): string {
+  if (memo && memo.user === user && memo.pwd === pwd) return memo.expected
+  const expected = "Basic " + btoa(`${user}:${pwd}`)
+  memo = { user, pwd, expected }
+  return expected
 }
 
 export function adminGate() {
@@ -23,9 +31,8 @@ export function adminGate() {
     if (!pwd) {
       return c.json({ error: "MIGRATE_UI_PASSWORD is not set. Refusing to serve admin." }, 500)
     }
-    const expected = "Basic " + btoa(`${user}:${pwd}`)
     const got = c.req.header("authorization") || ""
-    if (got !== expected) {
+    if (got !== expectedHeader(user, pwd)) {
       return new Response("Authentication required", {
         status: 401,
         headers: { "www-authenticate": `Basic realm="Teeny Admin", charset="UTF-8"` },

@@ -13,8 +13,6 @@ import type { FilesMap } from "./state"
 // @ts-ignore — ?raw import resolved at build time
 import teenybaseBundle from "../user-runtime/teenybase_bundle.js?raw"
 
-export { STARTER_FILES } from "../user-runtime/starter-files"
-
 const COMPAT_DATE = "2026-01-28"
 const EXTERNALS = ["teenybase", "virtual:teenybase"]
 

@@ -17,10 +17,11 @@ import {
   hasIdentitiesExtension,
 } from "../user-runtime/teenybase_bundle.js"
 import type { DatabaseSettings } from "teenybase"
-import type {
-  GenerateResult,
-  MetaTableStatus,
-  StatusPayload,
+import {
+  filesEqual,
+  type GenerateResult,
+  type MetaTableStatus,
+  type StatusPayload,
 } from "@shared/types"
 import {
   ADMIN_STATE_DDL,
@@ -230,7 +231,7 @@ export async function deploy(
     helper.apply(migrations, nextStamped as any, opts.baselineVersion),
   ])
 
-  const samePromote = prevLive ? JSON.stringify(prevLive) === JSON.stringify(files) : false
+  const samePromote = !!prevLive && filesEqual(prevLive, files)
   await Promise.all([
     writeFiles(db, files),
     writeConfig(db, nextStamped as DatabaseSettings),

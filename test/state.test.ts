@@ -2,7 +2,6 @@ import { env } from "cloudflare:test"
 import { describe, it, expect, beforeEach } from "vitest"
 import {
   ADMIN_STATE_DDL,
-  adminStateTableExists,
   readConfig,
   readFiles,
   writeConfig,
@@ -20,7 +19,6 @@ describe("admin state", () => {
   beforeEach(freshDB)
 
   it("returns null when the table doesn't exist", async () => {
-    expect(await adminStateTableExists(env.TEENY_PRIMARY_DB)).toBe(false)
     expect(await readFiles(env.TEENY_PRIMARY_DB)).toBeNull()
     expect(await readConfig(env.TEENY_PRIMARY_DB)).toBeNull()
   })

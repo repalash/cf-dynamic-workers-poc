@@ -37,29 +37,18 @@ async function writeKey(db: D1Database, key: StateKey, value: string): Promise<v
     .run()
 }
 
-function parseFiles(s: string | null): FilesMap | null {
+function safeJsonParse<T>(s: string | null): T | null {
   if (!s) return null
   try {
     const parsed = JSON.parse(s)
-    return typeof parsed === "object" && parsed ? (parsed as FilesMap) : null
+    return typeof parsed === "object" && parsed ? (parsed as T) : null
   } catch {
     return null
   }
 }
 
-export async function adminStateTableExists(db: D1Database): Promise<boolean> {
-  try {
-    const row = await db
-      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='_teeny_admin_state'")
-      .first()
-    return row !== null
-  } catch {
-    return false
-  }
-}
-
-export const readFiles = async (db: D1Database) => parseFiles(await readKey(db, "files"))
-export const readDraftFiles = async (db: D1Database) => parseFiles(await readKey(db, "files_draft"))
+export const readFiles = async (db: D1Database) => safeJsonParse<FilesMap>(await readKey(db, "files"))
+export const readDraftFiles = async (db: D1Database) => safeJsonParse<FilesMap>(await readKey(db, "files_draft"))
 export async function writeFiles(db: D1Database, files: FilesMap): Promise<void> {
   await writeKey(db, "files", JSON.stringify(files))
 }
@@ -71,13 +60,7 @@ export async function deleteDraftFiles(db: D1Database): Promise<void> {
 }
 
 export async function readConfig(db: D1Database): Promise<DatabaseSettings | null> {
-  const s = await readKey(db, "config")
-  if (!s) return null
-  try {
-    return JSON.parse(s) as DatabaseSettings
-  } catch {
-    return null
-  }
+  return safeJsonParse<DatabaseSettings>(await readKey(db, "config"))
 }
 export async function writeConfig(db: D1Database, config: DatabaseSettings): Promise<void> {
   await writeKey(db, "config", JSON.stringify(config))
@@ -95,16 +78,8 @@ export async function readRuntimeState(
       .all<{ key: string; value: string }>()
     const map = new Map((rows.results ?? []).map((r) => [r.key, r.value]))
     return {
-      files: parseFiles(map.get("files") ?? null),
-      config: (() => {
-        const s = map.get("config")
-        if (!s) return null
-        try {
-          return JSON.parse(s) as DatabaseSettings
-        } catch {
-          return null
-        }
-      })(),
+      files: safeJsonParse<FilesMap>(map.get("files") ?? null),
+      config: safeJsonParse<DatabaseSettings>(map.get("config") ?? null),
     }
   } catch {
     return { files: null, config: null }

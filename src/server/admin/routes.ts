@@ -5,7 +5,6 @@ import { Hono, type Context } from "hono"
 import { HTTPException } from "hono/http-exception"
 import { adminGate } from "./auth"
 import {
-  adminStateTableExists,
   deleteDraftFiles,
   readConfig,
   readDraftFiles,
@@ -136,9 +135,7 @@ export function createAdminRoutes() {
   // deploys don't expose this.
   app.post("/_reset-admin-state", async (c) => {
     if (c.env.DEBUG_ERRORS !== "1") throw new HTTPException(404, { message: "not found" })
-    if (await adminStateTableExists(c.env.TEENY_PRIMARY_DB)) {
-      await c.env.TEENY_PRIMARY_DB.prepare("DELETE FROM _teeny_admin_state").run().catch(() => {})
-    }
+    await c.env.TEENY_PRIMARY_DB.prepare("DELETE FROM _teeny_admin_state").run().catch(() => {})
     return c.json({ ok: true })
   })
 

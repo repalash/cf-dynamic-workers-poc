@@ -2,12 +2,13 @@ import { useEffect, useMemo, useState } from "react"
 import { api } from "./api"
 import { Editor } from "./Editor"
 import { Confirm } from "./Confirm"
-import type {
-  DiffChanges,
-  FilesMap,
-  GenerateResult,
-  MigrationHistoryRow,
-  StatusPayload,
+import {
+  filesEqual,
+  type DiffChanges,
+  type FilesMap,
+  type GenerateResult,
+  type MigrationHistoryRow,
+  type StatusPayload,
 } from "@shared/types"
 
 function joinSql(migs: { sql: string }[]) {
@@ -25,17 +26,6 @@ function pad5(n: number) {
 function extOf(name: string): "json" | "javascript" {
   return name.endsWith(".json") ? "json" : "javascript"
 }
-function filesEqual(a: FilesMap, b: FilesMap): boolean {
-  const ak = Object.keys(a).sort()
-  const bk = Object.keys(b).sort()
-  if (ak.length !== bk.length) return false
-  for (let i = 0; i < ak.length; i++) {
-    if (ak[i] !== bk[i]) return false
-    if (a[ak[i]] !== b[bk[i]]) return false
-  }
-  return true
-}
-
 function ErrorBanner({ err, onClose }: { err: string | null; onClose: () => void }) {
   if (!err) return null
   return (
@@ -285,11 +275,11 @@ export function App() {
       destructive: true,
       run: () => {
         setConfirmOpen(null)
-        setFiles((f) => { const { [name]: _, ...rest } = f; return rest })
-        if (activeFile === name) {
-          const next = Object.keys(files).find((n) => n !== name) ?? ""
-          setActiveFile(next)
-        }
+        setFiles((f) => {
+          const { [name]: _, ...rest } = f
+          if (activeFile === name) setActiveFile(Object.keys(rest)[0] ?? "")
+          return rest
+        })
       },
     })
   }

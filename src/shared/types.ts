@@ -21,6 +21,15 @@ export interface StatusPayload {
 
 export type FilesMap = Record<string, string>
 
+export function filesEqual(a: FilesMap, b: FilesMap): boolean {
+  const ak = Object.keys(a)
+  if (ak.length !== Object.keys(b).length) return false
+  for (const k of ak) {
+    if (!(k in b) || a[k] !== b[k]) return false
+  }
+  return true
+}
+
 export interface FilesResponse {
   live: FilesMap | null       // null if never deployed
   draft: FilesMap | null      // null if no draft saved (= live is source of truth)
