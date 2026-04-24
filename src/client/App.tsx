@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import { api } from "./api"
 import { Editor } from "./Editor"
 import { Confirm } from "./Confirm"
+import { ChatPanel } from "./ChatPanel"
 import {
   filesEqual,
   type DiffChanges,
@@ -304,8 +305,14 @@ export function App() {
   const setupMissing = configMatch === "setup-required"
   const fileNames = Object.keys(files).sort()
 
+  const handleFilesChanged = useCallback(() => {
+    loadAll()
+    api.history().then((r) => setHistory(r.rows)).catch(() => {})
+  }, [])
+
   return (
-    <>
+    <div className="app-layout">
+    <div className="app-content">
       <header className="site">
         <h1>
           <span className="brand">teenybase</span>
@@ -516,6 +523,8 @@ export function App() {
         onConfirm={() => confirmOpen?.run()}
         onCancel={() => setConfirmOpen(null)}
       />
-    </>
+    </div>
+    <ChatPanel onFilesChanged={handleFilesChanged} />
+    </div>
   )
 }

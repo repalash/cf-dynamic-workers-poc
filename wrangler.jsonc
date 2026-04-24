@@ -1,9 +1,11 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "cf-dynamic-workers-poc",
+  "account_id": "53a144fad4e15ca51c32da9b9fe25d4a",
   "main": "src/server/worker.ts",
   "compatibility_date": "2026-01-28",
   "compatibility_flags": ["nodejs_compat"],
+  "ai": { "binding": "AI" },
   "assets": {
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
@@ -16,7 +18,7 @@
     {
       "binding": "TEENY_PRIMARY_DB",
       "database_name": "cf-dynamic-workers-poc-db",
-      "database_id": "00000000-0000-0000-0000-000000000000"
+      "database_id": "647176e3-b32f-473c-aef0-6300b8ec1f82"
     }
   ],
   "vars": {

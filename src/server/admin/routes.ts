@@ -15,6 +15,7 @@ import type { FilesMap } from "./state"
 import { clearDB, deploy, generate, history, setup, status } from "./migrations"
 import { STARTER_FILES } from "../user-runtime/starter-files"
 import { TEENYBASE_VERSION } from "teenybase"
+import { handleChat } from "./chat"
 
 type Env = {
   Bindings: {
@@ -129,6 +130,20 @@ export function createAdminRoutes() {
       })
     }
     return c.json({ ok: true, dropped: r.dropped.length, names: r.dropped })
+  })
+
+  // AI chat endpoint — streams responses via Vercel AI SDK protocol.
+  app.post("/chat", async (c) => {
+    const url = new URL(c.req.url)
+    // D1RPC export is needed for testEndpoint to spawn the dynamic worker
+    const exports = (c.executionCtx as any).exports || (globalThis as any).__exports
+    return handleChat(c.req.raw, {
+      AI: (c.env as any).AI,
+      TEENY_PRIMARY_DB: c.env.TEENY_PRIMARY_DB,
+      LOADER: c.env.LOADER,
+      WORKER_URL: url.origin,
+      D1RPC_EXPORT: exports,
+    })
   })
 
   // Test-only: wipe admin state rows. Gated behind DEBUG_ERRORS so production
