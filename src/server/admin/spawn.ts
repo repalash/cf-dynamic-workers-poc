@@ -8,13 +8,14 @@
 // $Database can enforce the DDB_SETTINGS_VERSION header check on inbound
 // requests. That's defense-in-depth against any cache-eviction race.
 import type { DatabaseSettings } from "teenybase"
-import { createWorker } from "@cloudflare/worker-bundler"
 import type { FilesMap } from "./state"
+import { buildUserWorkerOrThrow } from "./build-user-worker"
 // @ts-ignore — ?raw import resolved at build time
 import teenybaseBundle from "../user-runtime/teenybase_bundle.js?raw"
+// @ts-ignore — ?raw import resolved at build time
+import jsxRuntime from "../user-runtime/jsx-runtime.js?raw"
 
 const COMPAT_DATE = "2026-01-28"
-const EXTERNALS = ["teenybase", "virtual:teenybase"]
 
 type Env = {
   TEENY_PRIMARY_DB: D1Database
@@ -55,15 +56,16 @@ export async function spawnDynamic(
   const id = await cacheKey(config, files)
 
   const worker = env.LOADER.get(id, async () => {
-    const bundled = await createWorker({
-      files,
-      bundle: true,
-      externals: EXTERNALS,
-    })
+    const bundled = await buildUserWorkerOrThrow(files)
     const configModule = `export default ${JSON.stringify(config)};\n`
     const modules: Record<string, any> = { ...bundled.modules }
     modules["teenybase"] = { js: teenybaseBundle as string }
     modules["virtual:teenybase"] = { js: configModule }
+    // JSX runtime for TSX support — esbuild transforms <Component/> into
+    // jsx() calls importing from "hono/jsx/jsx-runtime". Our lightweight
+    // runtime renders JSX directly to HTML strings (no vnode tree).
+    modules["hono/jsx/jsx-runtime"] = { js: jsxRuntime as string }
+    modules["hono/jsx/jsx-dev-runtime"] = { js: jsxRuntime as string }
     return {
       compatibilityDate: COMPAT_DATE,
       compatibilityFlags: ["nodejs_compat"],

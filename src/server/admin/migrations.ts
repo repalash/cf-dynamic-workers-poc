@@ -17,6 +17,7 @@ import {
   hasIdentitiesExtension,
 } from "../user-runtime/teenybase_bundle.js"
 import type { DatabaseSettings } from "teenybase"
+import { buildUserWorkerOrThrow } from "./build-user-worker"
 import {
   filesEqual,
   type GenerateResult,
@@ -202,6 +203,9 @@ export async function deploy(
   files: FilesMap,
   opts: DeployOpts
 ): Promise<DeployResult> {
+  // Preflight: validate that user files compile before touching the database.
+  await buildUserWorkerOrThrow(files)
+
   const next = await evalConfigFromFiles(env, files)
   const { helper } = buildAdminDb(db, next)
 

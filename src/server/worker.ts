@@ -2,9 +2,11 @@
 //   /_teeny/admin/api/*  → admin Hono sub-app
 //   /_teeny/admin/*      → SPA assets (with SPA fallback to index.html)
 //   everything else      → bundle current live files + LOADER.load + forward
+//                          + inject chat widget into HTML responses
 import { createAdminRoutes } from "./admin/routes"
 import { readRuntimeState } from "./admin/state"
 import { spawnDynamic } from "./admin/spawn"
+import { CHAT_WIDGET_HTML } from "./chat-widget"
 
 type Env = {
   TEENY_PRIMARY_DB: D1Database
@@ -69,7 +71,19 @@ export default {
         config,
         (ctx as any).exports || (globalThis as any).__exports
       )
-      return dyn.fetch(req)
+      const resp = await dyn.fetch(req)
+      // Inject chat widget into HTML responses
+      const ct = resp.headers.get("content-type") || ""
+      if (ct.includes("text/html")) {
+        return new HTMLRewriter()
+          .on("body", {
+            element(el) {
+              el.append(CHAT_WIDGET_HTML, { html: true })
+            },
+          })
+          .transform(resp)
+      }
+      return resp
     } catch (e: any) {
       const debug = env.DEBUG_ERRORS === "1"
       const body = debug

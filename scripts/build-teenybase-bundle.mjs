@@ -10,10 +10,17 @@
 import { build } from "esbuild"
 import { fileURLToPath } from "node:url"
 import { dirname, resolve } from "node:path"
+import { existsSync } from "node:fs"
 
 const here = dirname(fileURLToPath(import.meta.url))
 const entry = resolve(here, "../src/server/user-runtime/bundle-entry.ts")
 const out = resolve(here, "../src/server/user-runtime/teenybase_bundle.js")
+
+// Skip rebuild if bundle already exists and source deps are unavailable
+if (existsSync(out) && !existsSync(resolve(here, "../../teenybase/src/bundle/cf-ui-entry.ts"))) {
+  console.log(`teenybase bundle already exists, skipping rebuild → ${out}`)
+  process.exit(0)
+}
 
 await build({
   entryPoints: [entry],

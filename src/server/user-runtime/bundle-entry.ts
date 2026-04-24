@@ -36,3 +36,9 @@ export { html, raw } from "hono/html"
 
 // hono/cookie — set/delete the teenybase auth cookie after login/logout.
 export { setCookie, deleteCookie, getCookie } from "hono/cookie"
+
+// hono/jsx — JSX runtime for server-side TSX. When user files use .tsx,
+// esbuild transforms JSX to jsx() calls importing from "hono/jsx/jsx-runtime".
+// We re-export here so spawnDynamic can wire a virtual module that re-exports
+// from "teenybase" → this bundle.
+export { jsx, Fragment } from "hono/jsx"

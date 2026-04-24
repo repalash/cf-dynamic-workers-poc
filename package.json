@@ -16,11 +16,14 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@ai-sdk/react": "^3.0.170",
     "@cloudflare/worker-bundler": "^0.1.2",
+    "ai": "^6.0.168",
     "hono": "^4.11.9",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "teenybase": "file:../teenybase",
+    "workers-ai-provider": "^3.1.12",
     "zod": "^3.23.8"
   },
   "devDependencies": {

@@ -15,6 +15,8 @@ import type { FilesMap } from "./state"
 import { clearDB, deploy, generate, history, setup, status } from "./migrations"
 import { STARTER_FILES } from "../user-runtime/starter-files"
 import { TEENYBASE_VERSION } from "teenybase"
+import { handleChat, getChatLogs } from "./chat"
+import { buildUserWorker } from "./build-user-worker"
 
 type Env = {
   Bindings: {
@@ -94,6 +96,15 @@ export function createAdminRoutes() {
     return c.json({ ok: true })
   })
 
+  app.post("/validate-build", async (c) => {
+    const { files } = await filesFromBody(c)
+    const result = await buildUserWorker(files)
+    if (result.ok) {
+      return c.json({ ok: true, mainModule: result.mainModule, warnings: result.warnings })
+    }
+    return c.json({ ok: false, error: result.error }, 422)
+  })
+
   app.post("/generate", async (c) => {
     const { files } = await filesFromBody(c)
     return c.json(await generate(c.env.TEENY_PRIMARY_DB, { LOADER: c.env.LOADER }, files))
@@ -129,6 +140,28 @@ export function createAdminRoutes() {
       })
     }
     return c.json({ ok: true, dropped: r.dropped.length, names: r.dropped })
+  })
+
+  // AI chat endpoint — streams responses via Vercel AI SDK protocol.
+  app.post("/chat", async (c) => {
+    const url = new URL(c.req.url)
+    // D1RPC export is needed for testEndpoint to spawn the dynamic worker
+    const exports = (c.executionCtx as any).exports || (globalThis as any).__exports
+    return handleChat(c.req.raw, {
+      AI: (c.env as any).AI,
+      TEENY_PRIMARY_DB: c.env.TEENY_PRIMARY_DB,
+      LOADER: c.env.LOADER,
+      WORKER_URL: url.origin,
+      D1RPC_EXPORT: exports,
+      WAIT_UNTIL: (p: Promise<any>) => c.executionCtx.waitUntil(p),
+    })
+  })
+
+  // Chat log query endpoints — list all sessions or drill into one
+  app.get("/chat-logs", async (c) => {
+    const limit = parseInt(c.req.query("limit") ?? "50", 10)
+    const sessionId = c.req.query("session") ?? undefined
+    return c.json({ logs: await getChatLogs(c.env.TEENY_PRIMARY_DB, limit, sessionId) })
   })
 
   // Test-only: wipe admin state rows. Gated behind DEBUG_ERRORS so production
