@@ -4,6 +4,14 @@ import { json } from "@codemirror/lang-json"
 
 export type Lang = "json" | "sql" | "javascript"
 
+// `sql` is intentionally handled by the JS grammar — CodeMirror's sql pack
+// isn't pulled in to keep the bundle small; JS highlighting is lenient enough.
+const EXTENSIONS: Record<Lang, () => any[]> = {
+  json: () => [json()],
+  javascript: () => [javascript({ jsx: false })],
+  sql: () => [javascript({ typescript: false, jsx: false })],
+}
+
 export function Editor({
   value,
   onChange,
@@ -17,12 +25,7 @@ export function Editor({
   minHeight?: string
   readOnly?: boolean
 }) {
-  const extensions =
-    lang === "json"
-      ? [json()]
-      : lang === "javascript"
-        ? [javascript({ jsx: false })]
-        : [javascript({ typescript: false, jsx: false })] // sql → treat as js for now; syntax highlight is lenient
+  const extensions = EXTENSIONS[lang]()
   return (
     <div className="editor-wrap">
       <CodeMirror

@@ -16,7 +16,7 @@
     {
       "binding": "TEENY_PRIMARY_DB",
       "database_name": "cf-dynamic-workers-poc-db",
-      "database_id": "00000000-0000-0000-0000-000000000000"
+      "database_id": "8d36054f-30e9-436d-9a7d-f3d804aff10d"
     }
   ],
   "vars": {

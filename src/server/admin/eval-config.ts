@@ -13,7 +13,7 @@
 //     re-exports (see user-runtime/bundle-entry.ts).
 import { createWorker } from "@cloudflare/worker-bundler"
 import type { DatabaseSettings } from "teenybase"
-import type { FilesMap } from "./state"
+import type { FilesMap } from "@shared/types"
 // @ts-ignore — ?raw import
 import teenybaseBundle from "../user-runtime/teenybase_bundle.js?raw"
 

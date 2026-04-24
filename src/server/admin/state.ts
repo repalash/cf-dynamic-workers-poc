@@ -3,6 +3,9 @@
 //   files_draft  — the editor's working copy; deploy promotes it to files
 //   config       — compiled DatabaseSettings JSON from the last deploy
 import type { DatabaseSettings } from "teenybase"
+import type { FilesMap } from "@shared/types"
+
+export type { FilesMap }
 
 export const ADMIN_STATE_DDL = `
 CREATE TABLE IF NOT EXISTS _teeny_admin_state (
@@ -11,8 +14,6 @@ CREATE TABLE IF NOT EXISTS _teeny_admin_state (
   updated_at INTEGER NOT NULL
 );
 `.trim()
-
-export type FilesMap = Record<string, string>
 
 type StateKey = "files" | "files_draft" | "config"
 

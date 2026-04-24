@@ -11,7 +11,7 @@ import {
   readFiles,
   writeDraftFiles,
 } from "./state"
-import type { FilesMap } from "./state"
+import type { FilesMap } from "@shared/types"
 import { clearDB, deploy, generate, history, setup, status } from "./migrations"
 import { STARTER_FILES } from "../user-runtime/starter-files"
 import { TEENYBASE_VERSION } from "teenybase"

@@ -42,6 +42,54 @@ function StepNum({ n, active }: { n: number; active: boolean }) {
   return <span className={`step-num${active ? " active" : ""}`}>{n}</span>
 }
 
+type DeployPlan = {
+  title: string
+  body: string
+  destructive: boolean
+  payload: Parameters<typeof api.deploy>[0]
+}
+
+function buildDeployPlan(args: {
+  hasCustomSql: boolean
+  currentSql: string
+  customName: string
+  lastGen: GenerateResult
+  draftAheadOfLive: boolean
+  files: FilesMap
+  baselineVersion: number | null
+  autoSql: string
+}): DeployPlan {
+  const { hasCustomSql, currentSql, customName, lastGen, draftAheadOfLive, files, baselineVersion, autoSql } = args
+  if (hasCustomSql) {
+    const suffix = customName.trim() || "custom.sql"
+    const finalSuffix = suffix.endsWith(".sql") ? suffix : suffix + ".sql"
+    const fullCustomName = `${pad5(lastGen.startIndex)}_${finalSuffix}`
+    const destructive = looksDestructive(currentSql)
+    return {
+      destructive,
+      title: `Deploy — apply custom SQL as "${fullCustomName}"${draftAheadOfLive ? " + promote drafts" : ""}`,
+      body: (destructive ? "⚠ Destructive operations.\n\n" : "") + `-- ${fullCustomName}\n${currentSql}`,
+      payload: { files, customSql: currentSql, customName: fullCustomName, baselineVersion },
+    }
+  }
+  if (lastGen.migrations.length > 0) {
+    const destructive = looksDestructive(autoSql)
+    return {
+      destructive,
+      title: `Deploy — run ${lastGen.migrations.length} migration${lastGen.migrations.length === 1 ? "" : "s"}${draftAheadOfLive ? " + promote drafts" : ""}`,
+      body: (destructive ? "⚠ Destructive operations.\n\n" : "") +
+        lastGen.migrations.map((m) => `-- ${m.name}\n${m.sql.trim()}`).join("\n\n"),
+      payload: { files, baselineVersion },
+    }
+  }
+  return {
+    destructive: false,
+    title: `Deploy — promote drafts (no schema change)`,
+    body: "No SQL will run. $settings_version bumps; live files update to drafts.",
+    payload: { files, baselineVersion },
+  }
+}
+
 function StatusPanel({ status, draftsAhead, hasLive }: { status: StatusPayload; draftsAhead: boolean; hasLive: boolean }) {
   const row = (name: keyof typeof status.metaTables) => (
     <span key={name} className={`item${status.metaTables[name] ? " ok" : " bad"}`}>
@@ -108,23 +156,25 @@ function DiffOutput({ changes, extraLogs }: { changes: DiffChanges; extraLogs: s
   )
 }
 
+type Busy = "" | "setup" | "save-draft" | "revert" | "generate" | "deploy" | "clear"
+
+type ConfirmCfg = { title: string; body: string; destructive: boolean; run: () => void }
+
 export function App() {
   const [status, setStatus] = useState<StatusPayload | null>(null)
   const [live, setLive] = useState<FilesMap | null>(null)
   const [files, setFiles] = useState<FilesMap>({})
-  const [draftSaved, setDraftSaved] = useState<FilesMap | null>(null)
+  const [serverDraft, setServerDraft] = useState<FilesMap | null>(null)
   const [activeFile, setActiveFile] = useState<string>("")
   const [lastGen, setLastGen] = useState<GenerateResult | null>(null)
   const [sqlText, setSqlText] = useState<string>("")
   const [customName, setCustomName] = useState<string>("")
   const [history, setHistory] = useState<MigrationHistoryRow[]>([])
   const [err, setErr] = useState<string | null>(null)
-  const [busy, setBusy] = useState<string>("")
+  const [busy, setBusy] = useState<Busy>("")
   const [note, setNote] = useState<string>("")
   const [newFileName, setNewFileName] = useState<string>("")
-  const [confirmOpen, setConfirmOpen] = useState<{
-    run: () => void; title: string; body: string; destructive: boolean
-  } | null>(null)
+  const [confirmOpen, setConfirmOpen] = useState<ConfirmCfg | null>(null)
 
   async function loadAll() {
     try {
@@ -132,7 +182,7 @@ export function App() {
       const [s, f] = await Promise.all([api.status(), api.files()])
       setStatus(s)
       setLive(f.live)
-      setDraftSaved(f.draft)
+      setServerDraft(f.draft)
       setFiles(f.editor)
       if (!activeFile || !(activeFile in f.editor)) {
         const first = "teenybase.ts" in f.editor ? "teenybase.ts" : Object.keys(f.editor)[0] ?? ""
@@ -149,7 +199,7 @@ export function App() {
 
   const autoSql = useMemo(() => (lastGen ? joinSql(lastGen.migrations) : ""), [lastGen])
   const sqlEdited = lastGen ? sqlText.trim() !== autoSql.trim() : false
-  const draftDirty = !filesEqual(files, draftSaved ?? live ?? {})
+  const draftDirty = !filesEqual(files, serverDraft ?? live ?? {})
   const draftAheadOfLive = live ? !filesEqual(files, live) : Object.keys(files).length > 0
   const canDeploy = !!lastGen && (
     draftAheadOfLive ||
@@ -162,102 +212,82 @@ export function App() {
     setFiles((f) => ({ ...f, [activeFile]: content }))
   }
 
-  async function doSetup() {
-    setBusy("setup"); setErr(null)
-    try {
-      await api.setup()
-      await loadAll()
-      const r = await api.history(); setHistory(r.rows)
-      setNote("Metadata tables created. Edit teenybase.ts / worker.js / user.js, then Generate → Deploy.")
-    } catch (e: any) { setErr(e.message) } finally { setBusy("") }
+  // Standard action lifecycle: setBusy → run → clear state on error/finally.
+  async function runBusy(tag: Busy, fn: () => Promise<void>) {
+    setBusy(tag); setErr(null)
+    try { await fn() } catch (e: any) { setErr(e.message) } finally { setBusy("") }
   }
-
-  async function doSaveDraft() {
-    setBusy("save-draft"); setErr(null)
-    try {
-      await api.saveDraft(files)
-      setDraftSaved({ ...files })
-      setNote("Draft saved. Not deployed yet — click Generate preview + Deploy.")
-    } catch (e: any) { setErr(e.message) } finally { setBusy("") }
-  }
-
-  async function doRevertDraft() {
-    if (!live) { setErr("Nothing to revert to — no deploy yet."); return }
+  // Same, but wrapped in a confirm modal.
+  function confirmAndRun(cfg: Omit<ConfirmCfg, "run">, tag: Busy, fn: () => Promise<void>) {
     setConfirmOpen({
-      title: "Revert drafts",
-      body: "Discard all draft edits and reset to the deployed files?",
-      destructive: true,
-      run: async () => {
-        setConfirmOpen(null); setBusy("revert"); setErr(null)
-        try {
-          await api.revertDraft()
-          await loadAll()
-          setNote("Drafts reverted to the deployed version.")
-        } catch (e: any) { setErr(e.message) } finally { setBusy("") }
-      },
+      ...cfg,
+      run: () => { setConfirmOpen(null); runBusy(tag, fn) },
     })
   }
 
-  async function doGenerate() {
-    setBusy("generate"); setErr(null); setNote("")
+  const doSetup = () => runBusy("setup", async () => {
+    await api.setup()
+    await loadAll()
+    const r = await api.history(); setHistory(r.rows)
+    setNote("Metadata tables created. Edit teenybase.ts / worker.js / user.js, then Generate → Deploy.")
+  })
+
+  const doSaveDraft = () => runBusy("save-draft", async () => {
+    await api.saveDraft(files)
+    setServerDraft({ ...files })
+    setNote("Draft saved. Not deployed yet — click Generate preview + Deploy.")
+  })
+
+  function doRevertDraft() {
+    if (!live) { setErr("Nothing to revert to — no deploy yet."); return }
+    confirmAndRun(
+      { title: "Revert drafts", body: "Discard all draft edits and reset to the deployed files?", destructive: true },
+      "revert",
+      async () => {
+        await api.revertDraft()
+        await loadAll()
+        setNote("Drafts reverted to the deployed version.")
+      }
+    )
+  }
+
+  const doGenerate = () => runBusy("generate", async () => {
+    setNote("")
     try {
       const g = await api.generate(files)
       setLastGen(g)
       const seed = joinSql(g.migrations) || "-- No schema changes. Write data-only SQL (backfill / seed) here."
       setSqlText(seed); setCustomName("")
     } catch (e: any) {
-      setErr(e.details ? `${e.message}: ${JSON.stringify(e.details, null, 2)}` : e.message)
-    } finally { setBusy("") }
-  }
+      throw new Error(e.details ? `${e.message}: ${JSON.stringify(e.details, null, 2)}` : e.message)
+    }
+  })
   function resetSql() { setSqlText(autoSql || "-- No schema changes.") }
 
-  async function doDeploy() {
+  function doDeploy() {
     if (!lastGen) return
     const baselineVersion = lastGen.version
     const currentSql = sqlText.trim()
     const hasCustomSql = sqlEdited && !isEmptyOrCommentsOnly(currentSql)
+    const plan = buildDeployPlan({
+      hasCustomSql, currentSql, customName, lastGen, draftAheadOfLive, files, baselineVersion, autoSql,
+    })
 
-    let title: string
-    let body: string
-    let destructive: boolean
-    let payload: Parameters<typeof api.deploy>[0]
-
-    if (hasCustomSql) {
-      const suffix = customName.trim() || "custom.sql"
-      const finalSuffix = suffix.endsWith(".sql") ? suffix : suffix + ".sql"
-      const fullCustomName = `${pad5(lastGen.startIndex)}_${finalSuffix}`
-      destructive = looksDestructive(currentSql)
-      title = `Deploy — apply custom SQL as "${fullCustomName}"${draftAheadOfLive ? " + promote drafts" : ""}`
-      body = (destructive ? "⚠ Destructive operations.\n\n" : "") + `-- ${fullCustomName}\n${currentSql}`
-      payload = { files, customSql: currentSql, customName: fullCustomName, baselineVersion }
-    } else if (lastGen.migrations.length > 0) {
-      destructive = looksDestructive(autoSql)
-      title = `Deploy — run ${lastGen.migrations.length} migration${lastGen.migrations.length === 1 ? "" : "s"}${draftAheadOfLive ? " + promote drafts" : ""}`
-      body = (destructive ? "⚠ Destructive operations.\n\n" : "") +
-        lastGen.migrations.map((m) => `-- ${m.name}\n${m.sql.trim()}`).join("\n\n")
-      payload = { files, baselineVersion }
-    } else {
-      destructive = false
-      title = `Deploy — promote drafts (no schema change)`
-      body = "No SQL will run. $settings_version bumps; live files update to drafts."
-      payload = { files, baselineVersion }
-    }
-
-    setConfirmOpen({
-      title, body, destructive,
-      run: async () => {
-        setConfirmOpen(null); setBusy("deploy"); setErr(null)
+    confirmAndRun(
+      { title: plan.title, body: plan.body, destructive: plan.destructive },
+      "deploy",
+      async () => {
         try {
-          const r = await api.deploy(payload)
+          const r = await api.deploy(plan.payload)
           await loadAll()
           setLastGen(null); setSqlText(""); setCustomName("")
           const h = await api.history(); setHistory(h.rows)
           setNote(`Deployed v${r.version}. ${r.promotedFiles ? "Files promoted." : "Files unchanged."} ${r.applied.length ? `Migrations: ${r.applied.join(", ")}` : "No SQL ran."}`)
         } catch (e: any) {
-          setErr(e.stack ? `${e.message}\n\n${e.stack}` : e.message)
-        } finally { setBusy("") }
-      },
-    })
+          throw new Error(e.stack ? `${e.message}\n\n${e.stack}` : e.message)
+        }
+      }
+    )
   }
 
   function addFile() {
@@ -284,20 +314,20 @@ export function App() {
     })
   }
 
-  async function doClear() {
-    setConfirmOpen({
-      title: "Clear DB",
-      body: "Drops teenybase metadata + every user table. Admin state (drafts + live files) is preserved.",
-      destructive: true,
-      run: async () => {
-        setConfirmOpen(null); setBusy("clear"); setErr(null)
-        try {
-          await api.clear(); await loadAll()
-          setLastGen(null); setSqlText(""); setCustomName(""); setHistory([])
-          setNote("Cleared.")
-        } catch (e: any) { setErr(e.message) } finally { setBusy("") }
+  function doClear() {
+    confirmAndRun(
+      {
+        title: "Clear DB",
+        body: "Drops teenybase metadata + every user table. Admin state (drafts + live files) is preserved.",
+        destructive: true,
       },
-    })
+      "clear",
+      async () => {
+        await api.clear(); await loadAll()
+        setLastGen(null); setSqlText(""); setCustomName(""); setHistory([])
+        setNote("Cleared.")
+      }
+    )
   }
 
   const configMatch = status?.configMatch ?? "setup-required"
@@ -337,7 +367,7 @@ export function App() {
         <section className="panel">
           <h2>Files{draftAheadOfLive ? " — drafts ahead of deployed" : ""}</h2>
           <p className="hint">
-            Edits persist as drafts ({draftDirty ? "unsaved" : draftSaved ? "saved" : live ? "none" : "unsaved"}). Runtime (<code>/</code>) always serves the last <strong>deployed</strong> files. <strong>Deploy</strong> atomically runs migrations and promotes drafts to live.
+            Edits persist as drafts ({draftDirty ? "unsaved" : serverDraft ? "saved" : live ? "none" : "unsaved"}). Runtime (<code>/</code>) always serves the last <strong>deployed</strong> files. <strong>Deploy</strong> atomically runs migrations and promotes drafts to live.
           </p>
           <div style={{ display: "flex", gap: 12 }}>
             <aside style={{ width: 220, flexShrink: 0, display: "flex", flexDirection: "column", gap: 2 }}>

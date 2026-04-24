@@ -19,6 +19,8 @@ import {
 import type { DatabaseSettings } from "teenybase"
 import {
   filesEqual,
+  type DeployResult,
+  type FilesMap,
   type GenerateResult,
   type MetaTableStatus,
   type StatusPayload,
@@ -33,7 +35,6 @@ import {
   writeDraftFiles,
   writeFiles,
 } from "./state"
-import type { FilesMap } from "./state"
 import { evalConfigFromFiles } from "./eval-config"
 import { STARTER_FILES } from "../user-runtime/starter-files"
 
@@ -71,8 +72,9 @@ function buildAdminDb(d1: D1Database, config?: DatabaseSettings) {
 
 type DbState = { settings: DatabaseSettings | undefined; version: number | null }
 
-async function dbState(db: D1Database, config?: DatabaseSettings): Promise<DbState> {
-  const { helper } = buildAdminDb(db, config)
+type MigrationHelper = ReturnType<typeof buildAdminDb>["helper"]
+
+async function dbStateFromHelper(helper: MigrationHelper): Promise<DbState> {
   return helper
     .dbSettings()
     .catch(() => ({ settings: undefined, version: null })) as Promise<DbState>
@@ -95,7 +97,7 @@ export async function status(db: D1Database, teenybaseVersion: string): Promise<
   const { helper } = buildAdminDb(db)
   const [countRow, state, adminCfg, list] = await Promise.all([
     db.prepare("SELECT COUNT(*) AS c FROM _db_migrations").first<{ c: number }>(),
-    dbState(db),
+    dbStateFromHelper(helper),
     readConfig(db),
     helper.list().catch(() => []),
   ])
@@ -137,9 +139,11 @@ export async function setup(db: D1Database): Promise<void> {
   const placeholderConfig = { tables: [] } as unknown as DatabaseSettings
   const { kv, helper, identities } = buildAdminDb(db, placeholderConfig)
 
-  const kvEntry = await kv.setup(0)
-  await helper.setup(0)
-  const idEntry = identities ? await identities.setup(0) : null
+  const [kvEntry, , idEntry] = await Promise.all([
+    kv.setup(0),
+    helper.setup(0),
+    identities ? identities.setup(0) : Promise.resolve(null),
+  ])
 
   const infraEntries = [kvEntry, idEntry].filter(
     (e): e is { name: string; sql: string; sql_revert?: string } =>
@@ -155,7 +159,7 @@ export async function generate(
 ): Promise<GenerateResult> {
   const next = await evalConfigFromFiles(env, files)
   const { helper } = buildAdminDb(db, next)
-  const [state, list] = await Promise.all([dbState(db, next), helper.list().catch(() => [])])
+  const [state, list] = await Promise.all([dbStateFromHelper(helper), helper.list().catch(() => [])])
   const { settings: applied, version } = state
   const startIndex = nextUserIndex(list)
   const gen = generateMigrations(next as any, applied as any, startIndex) as {
@@ -178,13 +182,6 @@ export interface DeployOpts {
   customSql?: string
   customName?: string
   baselineVersion: number | null
-}
-
-export interface DeployResult {
-  applied: string[]
-  version: number
-  config: DatabaseSettings
-  promotedFiles: boolean
 }
 
 /**
@@ -216,7 +213,7 @@ export async function deploy(
     }
     migrations = [{ name: opts.customName, sql: opts.customSql }]
   } else {
-    const [state, list] = await Promise.all([dbState(db, next), helper.list().catch(() => [])])
+    const [state, list] = await Promise.all([dbStateFromHelper(helper), helper.list().catch(() => [])])
     const startIndex = nextUserIndex(list)
     const gen = generateMigrations(next as any, state.settings as any, startIndex) as {
       migrations: { name: string; sql: string; sql_revert?: string }[]
@@ -309,7 +306,7 @@ export async function clearDB(db: D1Database): Promise<{ dropped: string[]; rema
 export async function history(db: D1Database) {
   try {
     const rows = await db
-      .prepare("SELECT id, name, applied_at FROM _db_migrations ORDER BY id DESC")
+      .prepare("SELECT id, name, applied_at FROM _db_migrations ORDER BY id DESC LIMIT 500")
       .all<{ id: number; name: string; applied_at: string }>()
     return (rows.results ?? []).map((r) => ({
       index: r.id,

@@ -9,7 +9,7 @@
 // requests. That's defense-in-depth against any cache-eviction race.
 import type { DatabaseSettings } from "teenybase"
 import { createWorker } from "@cloudflare/worker-bundler"
-import type { FilesMap } from "./state"
+import type { FilesMap } from "@shared/types"
 // @ts-ignore — ?raw import resolved at build time
 import teenybaseBundle from "../user-runtime/teenybase_bundle.js?raw"
 
@@ -21,22 +21,20 @@ type Env = {
   LOADER: any
 }
 
-/**
- * Hex-encoded sha256 of an input, truncated to 16 chars. Good enough for a
- * cache key — collisions are not security-critical here.
- */
-async function shortHash(input: string): Promise<string> {
-  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input))
-  return Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, "0"))
-    .join("")
-    .slice(0, 16)
-}
+// In-isolate memo. `deploy()` always bumps version, so version uniquely
+// identifies the live (files, config) tuple within an isolate's lifetime.
+// Avoids JSON.stringify+SHA-256 over the full file tree on every request.
+let keyMemo: { version: number; id: string } | null = null
 
 async function cacheKey(config: DatabaseSettings, files: FilesMap): Promise<string> {
-  const sortedFiles = Object.keys(files).sort().map((k) => [k, files[k]] as const)
-  const hash = await shortHash(JSON.stringify(sortedFiles))
   const v = (config as any).version ?? 0
-  return `teenyuser-v${v}-${hash}`
+  if (keyMemo && keyMemo.version === v) return keyMemo.id
+  const sortedFiles = Object.keys(files).sort().map((k) => [k, files[k]] as const)
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(sortedFiles)))
+  const hash = Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, "0")).join("").slice(0, 16)
+  const id = `teenyuser-v${v}-${hash}`
+  keyMemo = { version: v, id }
+  return id
 }
 
 /**
